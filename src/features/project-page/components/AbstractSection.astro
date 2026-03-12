@@ -1,0 +1,12 @@
+---
+const { abstract } = Astro.props;
+---
+<section id="abstract" class="abstract-card">
+  <div class="abstract-copy">
+    <p class="demo-group-kicker">{abstract.kicker}</p>
+    {abstract.title && <h2>{abstract.title}</h2>}
+    <p>
+      {abstract.body}
+    </p>
+  </div>
+</section>

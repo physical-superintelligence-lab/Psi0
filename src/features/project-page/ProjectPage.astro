@@ -1,0 +1,101 @@
+---
+import Base from "../../layouts/Base.astro";
+import "./project-page.css";
+import { projectPageContent } from "./content/projectContent.js";
+import { footerConfig, demoLayout, tableOfContents } from "./content/siteConfig.js";
+import HeroSection from "./components/HeroSection.astro";
+import AbstractSection from "./components/AbstractSection.astro";
+import DemosSection from "./components/DemosSection.astro";
+import MethodSection from "./components/MethodSection.astro";
+import ExperimentsSection from "./components/ExperimentsSection.astro";
+---
+<Base title="Ψ₀: An Open Foundation Model Towards Universal Humanoid Loco-Manipulation">
+  <main class="page">
+    <nav class="page-toc" aria-label="Page sections">
+      <div class="page-toc-inner">
+        <p class="page-toc-label">On This Page</p>
+        <div class="page-toc-links">
+          {tableOfContents.map((item, index) => (
+            <a
+              href={`#${item.id}`}
+              data-toc-link={item.id}
+              aria-current={index === 0 ? "true" : "false"}
+            >
+              {item.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    </nav>
+    <div class="content">
+      <div class="content-inner">
+        <HeroSection hero={projectPageContent.hero} />
+        <AbstractSection abstract={projectPageContent.abstract} />
+        <DemosSection demos={projectPageContent.demos} demoLayout={demoLayout} />
+        <MethodSection method={projectPageContent.method} />
+        <ExperimentsSection
+          experiments={projectPageContent.experiments}
+        />
+        <footer class="site-footer">
+          <p>{footerConfig.copyright}</p>
+          <a href={projectPageContent.footer.sourceCodeHref}>{projectPageContent.footer.sourceCodeLabel}</a>
+        </footer>
+      </div>
+    </div>
+  </main>
+</Base>
+
+<script is:inline define:vars={{ tableOfContents }}>
+  const tocIds = tableOfContents.map((item) => item.id);
+
+  const syncActiveTocLink = (activeId) => {
+    document.querySelectorAll("[data-toc-link]").forEach((link) => {
+      link.setAttribute("aria-current", link.dataset.tocLink === activeId ? "true" : "false");
+    });
+  };
+
+  const bindTocObserver = () => {
+    const sections = tocIds
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+    if (!sections.length) return;
+
+    let raf = null;
+    const update = () => {
+      raf = null;
+      const anchor = window.innerHeight * 0.33;
+      let activeSection = sections[0];
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      sections.forEach((section) => {
+        const rect = section.getBoundingClientRect();
+        const distance = Math.abs(rect.top - anchor);
+        if (rect.top <= anchor && distance < bestDistance) {
+          bestDistance = distance;
+          activeSection = section;
+        }
+      });
+
+      if (window.scrollY < 40) {
+        activeSection = sections[0];
+      }
+
+      syncActiveTocLink(activeSection.id);
+    };
+
+    const schedule = () => {
+      if (raf !== null) return;
+      raf = requestAnimationFrame(update);
+    };
+
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    schedule();
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bindTocObserver, { once: true });
+  } else {
+    bindTocObserver();
+  }
+</script>

@@ -1,0 +1,24 @@
+---
+import "../styles/theme.css";
+const { title = "Ψ₀ Research" } = Astro.props;
+const baseUrl = import.meta.env.BASE_URL ?? "/";
+const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+const faviconHref = `${normalizedBaseUrl}favicon.svg`;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <link rel="icon" type="image/svg+xml" href={faviconHref} />
+    <script
+      defer
+      src="https://analytics.zhenyuzhao.com/script.js"
+      data-website-id="9675155e-353d-469e-85d8-c03739bcbb8e"
+    ></script>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

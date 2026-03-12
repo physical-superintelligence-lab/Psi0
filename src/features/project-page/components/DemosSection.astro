@@ -1,0 +1,300 @@
+---
+const { demos } = Astro.props;
+const demoGroups = demos.groups;
+const initialGroup = demoGroups[0];
+const { demoLayout } = Astro.props;
+
+const demoLayoutVars = [
+  `--demo-card-min-width-desktop: ${demoLayout.cardMinWidthDesktop}`,
+  `--demo-card-width-desktop: ${demoLayout.cardWidthDesktop}`,
+  `--demo-card-width-mobile: ${demoLayout.cardWidthMobile}`,
+  `--demo-media-height: ${demoLayout.mediaHeight}`,
+  `--demo-copy-height: ${demoLayout.copyHeight}`,
+  `--demo-reel-edge-inset: ${demoLayout.edgeInset}`,
+  `--demo-reel-gap: ${demoLayout.reelGap}`,
+].join("; ");
+---
+<section id="demos" class="section">
+  <header class="section-head">
+    <h2>{demos.sectionTitle}</h2>
+  </header>
+  <div class="demo-browser" style={demoLayoutVars}>
+    <div class="demo-browser-head">
+      <div class="demo-group-head">
+        {initialGroup.intro && <p data-demo-theme-intro>{initialGroup.intro}</p>}
+      </div>
+      <div class="demo-browser-controls">
+        <div class="demo-theme-menu" role="tablist" aria-label="Demo themes">
+          {demoGroups.map((group, index) => (
+            <button
+              class="demo-theme-button"
+              type="button"
+              role="tab"
+              aria-selected={index === 0 ? "true" : "false"}
+              data-theme-button={group.slug}
+            >
+              {group.title}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    {demoGroups.map((group, groupIndex) => (
+      <div class="demo-carousel" data-theme-panel={group.slug} hidden={groupIndex !== 0}>
+        <button class="demo-nav-button demo-nav-button--overlay demo-nav-button--prev" type="button" aria-label="Previous demo" data-demo-nav="prev" data-demo-target={group.slug}>‹</button>
+        <div class="demo-reel" data-demo-reel={group.slug}>
+          {group.demos.map((demo, demoIndex) => (
+            <article
+              class="demo-stage-card"
+              data-demo-card
+              data-demo-index={demoIndex}
+              tabindex="0"
+              role="button"
+              aria-label={demo.title ? `Show demo: ${demo.title}` : "Show demo"}
+            >
+              <div class="demo-media-frame">
+                <video
+                  class="demo-video"
+                  src={demo.src}
+                  autoplay={demo.autoplay && groupIndex === 0}
+                  muted
+                  loop
+                  playsinline
+                  controls
+                  preload="metadata"
+                  data-demo-autoplay={demo.autoplay ? "true" : "false"}
+                ></video>
+              </div>
+              {(demo.label || demo.title || demo.summary) && (
+                <div class="demo-copy">
+                  {demo.label && <div class="demo-label">{demo.label}</div>}
+                  {demo.title && <h4>{demo.title}</h4>}
+                  {demo.summary && <p>{demo.summary}</p>}
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+        <button class="demo-nav-button demo-nav-button--overlay demo-nav-button--next" type="button" aria-label="Next demo" data-demo-nav="next" data-demo-target={group.slug}>›</button>
+      </div>
+    ))}
+  </div>
+</section>
+
+<script is:inline define:vars={{ demoGroups }}>
+  const themeBySlug = new Map(demoGroups.map((group) => [group.slug, group]));
+
+  const syncVideoAspect = (video) => {
+    if (!video) return;
+    const card = video.closest("[data-demo-card]");
+    if (!card) return;
+    const aspect = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+    card.dataset.mediaAspect = aspect;
+    video.classList.toggle("demo-video--portrait", aspect === "portrait");
+    video.controls = aspect !== "portrait";
+  };
+
+  const centerCardInReel = (reel, card, behavior = "smooth") => {
+    if (!reel || !card) return;
+    const reelRect = reel.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const offset = (cardRect.left - reelRect.left) - (reel.clientWidth - cardRect.width) / 2;
+    reel.scrollBy({ left: offset, behavior });
+  };
+
+  const updateReelInsets = (reel) => {
+    if (!reel) return;
+    const firstCard = reel.querySelector("[data-demo-card]");
+    if (!firstCard) return;
+    const inset = Math.max((reel.clientWidth - firstCard.clientWidth) / 2, 0);
+    reel.style.setProperty("--demo-reel-edge-inset", `${inset}px`);
+  };
+
+  const setActiveCard = (reel) => {
+    if (!reel) return 0;
+    const cards = [...reel.querySelectorAll("[data-demo-card]")];
+    if (!cards.length) return 0;
+    const reelCenter = reel.scrollLeft + reel.clientWidth / 2;
+    let activeIndex = 0;
+    let closestDistance = Number.POSITIVE_INFINITY;
+
+    cards.forEach((card, index) => {
+      const cardCenter = card.offsetLeft + card.offsetWidth / 2;
+      const distance = Math.abs(cardCenter - reelCenter);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        activeIndex = index;
+      }
+    });
+
+    cards.forEach((card, index) => {
+      const delta = Math.abs(index - activeIndex);
+      card.dataset.active = index === activeIndex ? "true" : "false";
+      card.dataset.near = delta === 1 ? "true" : "false";
+      card.dataset.far = delta > 1 ? "true" : "false";
+      const video = card.querySelector("video");
+      if (!video) return;
+      if (index === activeIndex && reel.closest("[hidden]") === null) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    });
+
+    reel.dataset.activeIndex = String(activeIndex);
+    return activeIndex;
+  };
+
+  const bindReel = (reel) => {
+    if (!reel || reel.dataset.bound === "true") return;
+    let raf = null;
+    let pointerId = null;
+    let startX = 0;
+    let startScrollLeft = 0;
+    let moved = false;
+    const update = () => {
+      raf = null;
+      updateReelInsets(reel);
+      setActiveCard(reel);
+    };
+    const schedule = () => {
+      if (raf !== null) return;
+      raf = requestAnimationFrame(update);
+    };
+
+    reel.querySelectorAll("[data-demo-card]").forEach((card) => {
+      if (card.dataset.bound === "true") return;
+      const video = card.querySelector("video");
+      if (video) {
+        if (video.readyState >= 1 && video.videoWidth && video.videoHeight) {
+          syncVideoAspect(video);
+        } else if (video.dataset.aspectBound !== "true") {
+          video.addEventListener("loadedmetadata", () => syncVideoAspect(video), { once: true });
+          video.dataset.aspectBound = "true";
+        }
+      }
+      const activateCard = () => {
+        centerCardInReel(reel, card, "smooth");
+        requestAnimationFrame(() => setActiveCard(reel));
+      };
+      card.addEventListener("click", activateCard);
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activateCard();
+        }
+      });
+      card.dataset.bound = "true";
+    });
+
+    reel.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    reel.addEventListener("pointerdown", (event) => {
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startScrollLeft = reel.scrollLeft;
+      moved = false;
+      reel.dataset.dragging = "true";
+      reel.setPointerCapture(pointerId);
+    });
+    reel.addEventListener("pointermove", (event) => {
+      if (pointerId !== event.pointerId) return;
+      const deltaX = event.clientX - startX;
+      if (Math.abs(deltaX) > 4) moved = true;
+      reel.scrollLeft = startScrollLeft - deltaX;
+    });
+    const endDrag = (event) => {
+      if (pointerId !== event.pointerId) return;
+      reel.dataset.dragging = "false";
+      reel.releasePointerCapture(pointerId);
+      pointerId = null;
+      schedule();
+    };
+    reel.addEventListener("pointerup", endDrag);
+    reel.addEventListener("pointercancel", endDrag);
+    reel.addEventListener("lostpointercapture", () => {
+      reel.dataset.dragging = "false";
+      pointerId = null;
+      schedule();
+    });
+    reel.addEventListener("click", (event) => {
+      if (!moved) return;
+      event.preventDefault();
+      event.stopPropagation();
+      moved = false;
+    }, true);
+    reel.dataset.bound = "true";
+    schedule();
+  };
+
+  const syncTheme = (slug) => {
+    const introNode = document.querySelector("[data-demo-theme-intro]");
+    const activeGroup = themeBySlug.get(slug);
+    if (!activeGroup) return;
+
+    if (introNode) introNode.textContent = activeGroup.intro;
+    document.querySelectorAll("[data-theme-button]").forEach((button) => {
+      button.setAttribute("aria-selected", button.dataset.themeButton === slug ? "true" : "false");
+    });
+
+    document.querySelectorAll("[data-theme-panel]").forEach((panel) => {
+      const isActive = panel.dataset.themePanel === slug;
+      panel.hidden = !isActive;
+      const reel = panel.querySelector("[data-demo-reel]");
+      if (!reel) return;
+      bindReel(reel);
+      if (isActive) {
+        const activeIndex = Number.parseInt(reel.dataset.activeIndex || "0", 10);
+        const cards = reel.querySelectorAll("[data-demo-card]");
+        const activeCard = cards[activeIndex] || cards[0];
+        reel.scrollLeft = 0;
+        requestAnimationFrame(() => {
+          updateReelInsets(reel);
+          requestAnimationFrame(() => {
+            centerCardInReel(reel, activeCard, "auto");
+            requestAnimationFrame(() => {
+              updateReelInsets(reel);
+              centerCardInReel(reel, activeCard, "auto");
+              setActiveCard(reel);
+            });
+          });
+        });
+      } else {
+        panel.querySelectorAll("video").forEach((video) => video.pause());
+      }
+    });
+  };
+
+  const bindDemos = () => {
+    document.querySelectorAll("[data-theme-button]").forEach((button) => {
+      if (button.dataset.bound === "true") return;
+      button.addEventListener("click", () => syncTheme(button.dataset.themeButton));
+      button.dataset.bound = "true";
+    });
+
+    document.querySelectorAll("[data-demo-nav]").forEach((button) => {
+      if (button.dataset.bound === "true") return;
+      button.addEventListener("click", () => {
+        const reel = document.querySelector(`[data-demo-reel="${button.dataset.demoTarget}"]`);
+        if (!reel) return;
+        const cards = [...reel.querySelectorAll("[data-demo-card]")];
+        if (!cards.length) return;
+        const currentIndex = setActiveCard(reel);
+        const direction = button.dataset.demoNav === "next" ? 1 : -1;
+        const targetIndex = Math.max(0, Math.min(cards.length - 1, currentIndex + direction));
+        centerCardInReel(reel, cards[targetIndex], "smooth");
+      });
+      button.dataset.bound = "true";
+    });
+
+    document.querySelectorAll("[data-demo-reel]").forEach((reel) => bindReel(reel));
+    syncTheme(demoGroups[0]?.slug);
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bindDemos, { once: true });
+  } else {
+    bindDemos();
+  }
+</script>

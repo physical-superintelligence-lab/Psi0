@@ -1,0 +1,101 @@
+---
+const { method } = Astro.props;
+---
+<section id="method" class="section method">
+  <header class="section-head">
+    <h2>{method.sectionTitle}</h2>
+  </header>
+  <article class="method-data-sources method-subsection">
+    <div class="method-data-sources-head">
+      <p class="demo-group-kicker">{method.dataSources.kicker}</p>
+      <h3>{method.dataSources.title}</h3>
+      <p set:html={method.dataSources.body}></p>
+    </div>
+    <div class="method-data-grid">
+      {method.dataSources.items.map((item, index) => (
+        <figure class={`method-data-figure method-data-figure--${index === 0 ? "video" : "humanoid"}`}>
+          <img src={item.src} alt={item.alt} />
+          <figcaption class="method-data-caption">
+            <h4>
+              {item.title}
+              <span class="method-data-inline-subtitle">{item.subtitle}</span>
+            </h4>
+            <p set:html={item.body}></p>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  </article>
+  <div class="method-lead">
+    <figure class="method-figure">
+      <div class="method-figure-copy">
+        <p class="demo-group-kicker">{method.architecture.kicker}</p>
+        <h3>{method.architecture.title}</h3>
+      </div>
+      <img src={method.architecture.src} alt={method.architecture.alt} />
+      {method.architecture.body && <p>{method.architecture.body}</p>}
+      {method.architecture.caption && <figcaption>{method.architecture.caption}</figcaption>}
+    </figure>
+  </div>
+  <article class="method-summary method-subsection method-subsection--training">
+    <p class="demo-group-kicker">{method.training.kicker}</p>
+    <h3>{method.training.title}</h3>
+    <p>
+      {method.training.body}
+    </p>
+    <div class="method-steps">
+      {method.steps.map((card, index) => (
+        <article class={`step step--stage-${index + 1} ${index === 0 ? "active" : ""}`}>
+          <div class="step-meta">
+            <span>{card.step}</span>
+            <div class="step-rule" aria-hidden="true"></div>
+          </div>
+          <h4>{card.title}</h4>
+          <p set:html={card.body}></p>
+        </article>
+      ))}
+    </div>
+  </article>
+  <div class="method-support">
+    <article class="method-panel method-panel--split">
+      <div class="method-panel--intro">
+        <p class="demo-group-kicker">{method.supportBlocks[0].kicker}</p>
+        <h3>{method.supportBlocks[0].title}</h3>
+      </div>
+      <div class="method-panel--text">
+        <p>{method.supportBlocks[0].body}</p>
+      </div>
+      <img src={method.supportBlocks[0].src} alt={method.supportBlocks[0].alt} />
+    </article>
+  </div>
+  <div class="method-support">
+    <article class="method-panel method-panel--stack">
+      <div class="method-panel--text">
+        <p class="demo-group-kicker">{method.supportBlocks[1].kicker}</p>
+        <h3>{method.supportBlocks[1].title}</h3>
+        <p>{method.supportBlocks[1].body}</p>
+      </div>
+      <img src={method.supportBlocks[1].src} alt={method.supportBlocks[1].alt} />
+    </article>
+  </div>
+  <div class="method-support">
+    <article class="method-visual method-visual--full">
+      <div class="method-visual-copy">
+        <p class="demo-group-kicker">{method.supportBlocks[2].kicker}</p>
+        <h3>{method.supportBlocks[2].title}</h3>
+        <p>{method.supportBlocks[2].body}</p>
+      </div>
+      <img src={method.supportBlocks[2].src} alt={method.supportBlocks[2].alt} />
+    </article>
+  </div>
+  <div class="method-support">
+    <article class="method-visual method-visual--full">
+      <div class="method-visual-copy">
+        <p class="demo-group-kicker">{method.supportBlocks[3].kicker}</p>
+        <h3>{method.supportBlocks[3].title}</h3>
+        <p>{method.supportBlocks[3].body}</p>
+      </div>
+      <img src={method.supportBlocks[3].src} alt={method.supportBlocks[3].alt} />
+    </article>
+  </div>
+</section>

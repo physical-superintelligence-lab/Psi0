@@ -1,0 +1,4 @@
+node_modules/
+.astro/
+dist/
+public/paper/psi0-paper.pdf

@@ -1,0 +1,113 @@
+---
+const { experiments } = Astro.props;
+---
+<section id="experiments" class="section">
+  <header class="section-head">
+    <h2>{experiments.sectionTitle}</h2>
+  </header>
+  <div class="results-layout">
+    <article class="results-panel">
+      <div class="results-head">
+        <p class="demo-group-kicker">{experiments.benchmark.kicker}</p>
+        <h3>{experiments.benchmark.title}</h3>
+        <p>{experiments.benchmark.body}</p>
+      </div>
+      <figure class="results-figure">
+        <img src={experiments.benchmark.figure.src} alt={experiments.benchmark.figure.alt} />
+        <figcaption>
+          {experiments.benchmark.figureCaption}
+        </figcaption>
+      </figure>
+      <div class="table-wrap">
+        <table class="results-table">
+          <thead>
+            <tr>
+              {experiments.benchmark.columns.map((column) => (
+                <th>{column.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {experiments.benchmark.rows.map((row) => (
+              <tr>
+                {experiments.benchmark.columns.map((column) => (
+                  <td>
+                    {column.emphasize ? <strong>{row[column.key]}</strong> : row[column.key]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="results-panel">
+      <div class="results-head">
+        <p class="demo-group-kicker">{experiments.ablation.kicker}</p>
+      </div>
+      <div class="supplementary-studies">
+        <article class="supplementary-study">
+          <div class="supplementary-study-head">
+            <h4>{experiments.ablation.title}</h4>
+            <p>{experiments.ablation.body}</p>
+          </div>
+          <div class="table-wrap">
+            <table class="results-table results-table--compact">
+              <thead>
+                <tr>
+                  {experiments.ablation.columns.map((column) => (
+                    <th>{column.label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {experiments.ablation.rows.map((row) => (
+                  <tr>
+                    {experiments.ablation.columns.map((column) => (
+                      <td>
+                        {column.key === "overall" ? <strong>{row[column.key]}</strong> : row[column.key]}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </article>
+        {experiments.ablation.studies.map((study) => (
+          <article class="supplementary-study">
+            <div class="supplementary-study-head">
+              <h4>{study.title}</h4>
+              <p>{study.body}</p>
+            </div>
+            {study.columns && study.rows && (
+              <div class="table-wrap">
+                <table class="results-table results-table--compact results-table--study">
+                  <thead>
+                    <tr>
+                      {study.columns.map((column) => (
+                        <th>{column.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {study.rows.map((row) => (
+                      <tr>
+                        {study.columns.map((column, index) => (
+                          <td>
+                            {index === 0 ? row[column.key] : <strong>{row[column.key]}</strong>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </article>
+  </div>
+</section>

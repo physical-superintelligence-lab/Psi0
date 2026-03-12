@@ -1,0 +1,45 @@
+---
+const { hero } = Astro.props;
+---
+<section id="hero" class="hero">
+  <div class="hero-copy">
+    <p class="eyebrow">
+      <a href={hero.eyebrow.href} target={hero.eyebrow.external ? "_blank" : undefined} rel={hero.eyebrow.external ? "noreferrer" : undefined}>
+        {hero.eyebrow.label}
+      </a>
+    </p>
+    <h1>{hero.title}</h1>
+    <div class="authors-inline">
+      {hero.authors.map((author) => (
+        <span set:html={author}></span>
+      ))}
+    </div>
+    <p class="author-note" set:html={hero.authorNote}></p>
+    <div class="affiliations">
+      {hero.affiliations.map((item) => (
+        <span>{item}</span>
+      ))}
+    </div>
+    <div class="cta-row">
+      {hero.actions.map((action, index) => (
+        <a class={`cta ${index === 0 ? "primary" : "cta-secondary"}`} href={action.href}>
+          {action.label}
+        </a>
+      ))}
+    </div>
+  </div>
+  <div class="hero-media">
+    <div class="video-frame">
+      <video
+        class="teaser-video"
+        src={hero.teaserVideoSrc}
+        aria-label={hero.teaserVideoAlt}
+        autoplay
+        muted
+        loop
+        playsinline
+        preload="auto"
+      ></video>
+    </div>
+  </div>
+</section>

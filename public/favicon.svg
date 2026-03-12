@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#1f1d1a"/>
+  <text
+    x="50%"
+    y="50%"
+    dominant-baseline="central"
+    text-anchor="middle"
+    fill="#f6f0e7"
+    font-family="Iowan Old Style, Palatino Linotype, Book Antiqua, Palatino, serif"
+    font-size="30"
+    font-weight="700"
+  >Ψ₀</text>
+</svg>
