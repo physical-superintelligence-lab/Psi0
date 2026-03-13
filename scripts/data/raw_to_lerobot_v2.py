@@ -113,10 +113,12 @@ def read_episode_data(path: Path) -> Dict:
     return data
 
 
-def iter_tasks(data_root: Path, tasks:list[str]=[]) -> Iterator[Tuple[str, Path, str, str]]:
+def iter_tasks(data_root: Path, tasks:list[str]=None) -> Iterator[Tuple[str, Path, str, str]]:
     # for cat_dir in sorted(
     #     [p for p in data_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()
     # ):
+        if tasks is None:
+            tasks = []
         for task_dir in sorted([p for p in data_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
             # print(task_dir.name);exit(0)
             # skip processed tasks

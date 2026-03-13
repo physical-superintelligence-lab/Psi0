@@ -109,7 +109,9 @@ def read_json_list(path: Path) -> List[Dict[str, Any]]:
     return data
 
 
-def iter_tasks(data_root: Path, tasks:list[str]=[]) -> Iterator[Tuple[str, Path, str, str]]:
+def iter_tasks(data_root: Path, tasks:list[str]=None) -> Iterator[Tuple[str, Path, str, str]]:
+    if tasks is None:
+        tasks = []
     for cat_dir in sorted(
         [p for p in data_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()
     ):

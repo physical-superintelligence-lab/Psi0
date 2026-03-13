@@ -147,7 +147,7 @@ class RetargetingConfig:
             path = path.absolute()
 
         with path.open("r") as f:
-            yaml_config = yaml.load(f, Loader=yaml.FullLoader)
+            yaml_config = yaml.safe_load(f, Loader=yaml.FullLoader)
             cfg = yaml_config["retargeting"]
             return cls.from_dict(cfg, override)
 

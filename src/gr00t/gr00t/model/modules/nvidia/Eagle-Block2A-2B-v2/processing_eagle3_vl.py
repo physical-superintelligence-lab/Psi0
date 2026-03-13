@@ -183,7 +183,7 @@ def fetch_image(ele: dict[str, str | Image.Image], size_factor: int = IMAGE_FACT
     elif isinstance(image, dict) and 'lmdb_file' in image:
         image_obj = parse_lmdb_image_data(image)
     elif image.startswith("http://") or image.startswith("https://"):
-        response = requests.get(image, stream=True)
+        response = requests.get(image, stream=True, timeout=10.0)
         image_obj = Image.open(BytesIO(response.content))
     elif image.startswith("file://"):
         image_obj = Image.open(image[7:])

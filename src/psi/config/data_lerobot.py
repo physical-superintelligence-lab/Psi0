@@ -38,13 +38,17 @@ class LerobotDataConfig(DataConfig):
                 self.transform.field.populate_stats(stats)
         return self
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         from psi.data.lerobot import LeRobotDatasetWrapper
         from psi.data.dataset import Dataset as MapStyleDataset
 
         train_dataset = LeRobotDatasetWrapper(self, split=split)
         return MapStyleDataset(self, train_dataset, transform_kwargs=transform_kwargs)
 
-    def mock(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def mock(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         dataset = self.__call__(split, transform_kwargs=transform_kwargs, **kwargs)
         return dataset[0]

@@ -23,7 +23,9 @@ class MixedDataConfig(DataConfig):
     sampler: str = "batch_mixture"  # or "token_mixture"
     tokens_per_device: int = 2048 # for token_mixture sampler
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         from psi.data.egodex.egodex_dataset import EgoDexDataset
         from psi.data.humanoid.he_raw_dataset import HERawDataset
         from psi.data.dataset import MixtureDataset

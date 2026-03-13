@@ -260,8 +260,10 @@ def get_frames_by_indices(
     video_path: str,
     indices: list[int] | np.ndarray,
     video_backend: str = "ffmpeg",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
 ) -> np.ndarray:
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     if video_backend == "decord":
         if not DECORD_AVAILABLE:
             raise ImportError("decord is not available. Install it with: pip install decord")
@@ -297,7 +299,7 @@ def get_frames_by_timestamps(
     video_path: str,
     timestamps: list[float] | np.ndarray,
     video_backend: str = "ffmpeg",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
 ) -> np.ndarray:
     """Get frames from a video at specified timestamps.
 
@@ -309,6 +311,8 @@ def get_frames_by_timestamps(
     Returns:
         np.ndarray: Frames at the specified timestamps.
     """
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     if video_backend == "decord":
         if not DECORD_AVAILABLE:
             raise ImportError("decord is not available. Install it with: pip install decord")
@@ -417,13 +421,15 @@ def get_frames_by_timestamps(
 def get_all_frames(
     video_path: str,
     video_backend: str = "ffmpeg",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Get all frames from a video.
 
     Returns:
         tuple[np.ndarray, np.ndarray]: Frames and timestamps.
     """
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     if video_backend == "decord":
         if not DECORD_AVAILABLE:
             raise ImportError("decord is not available. Install it with: pip install decord")

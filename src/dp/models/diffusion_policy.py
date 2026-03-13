@@ -175,7 +175,7 @@ class ConditionalUnet1D(nn.Module):
         input_dim,
         global_cond_dim,
         diffusion_step_embed_dim=256,
-        down_dims=[256,512,1024],
+        down_dims=None,
         kernel_size=5,
         n_groups=8
         ):
@@ -189,6 +189,8 @@ class ConditionalUnet1D(nn.Module):
         kernel_size: Conv kernel size
         n_groups: Number of groups for GroupNorm
         """
+        if down_dims is None:
+            down_dims = []
 
         super().__init__()
         all_dims = [input_dim] + list(down_dims)

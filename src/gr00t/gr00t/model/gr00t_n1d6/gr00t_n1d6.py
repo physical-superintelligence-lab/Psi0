@@ -678,7 +678,7 @@ class Gr00tN1d6(PreTrainedModel):
     def __init__(
         self,
         config: Gr00tN1d6Config,
-        transformers_loading_kwargs: dict = {"trust_remote_code": True},
+        transformers_loading_kwargs: dict = None,
     ):
         """
         Initialize Gr00tN1d6 model.
@@ -695,6 +695,8 @@ class Gr00tN1d6(PreTrainedModel):
         Note: During training, transformers parameters are passed from training config.
               During inference (e.g., from_pretrained), defaults are used.
         """
+        if transformers_loading_kwargs is None:
+            transformers_loading_kwargs = {}
         super().__init__(config)
         self.config = config
 

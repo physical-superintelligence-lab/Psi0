@@ -9,10 +9,12 @@ from queue import Queue, Empty
 from threading import Thread
 
 class EpisodeWriter():
-    def __init__(self, task_dir, frequency=30, image_size=[640, 480], rerun_log = True):
+    def __init__(self, task_dir, frequency=30, image_size=None, rerun_log = True):
         """
         image_size: [width, height]
         """
+        if image_size is None:
+            image_size = []
         print("==> EpisodeWriter initializing...\n")
         self.task_dir = task_dir
         self.frequency = frequency
