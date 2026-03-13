@@ -18,7 +18,7 @@ class EagleBackbone(torch.nn.Module):
         load_bf16: bool = False,
         tune_top_llm_layers: int = 0,
         trainable_params_fp32: bool = False,
-        transformers_loading_kwargs: dict = {},
+        transformers_loading_kwargs: dict = None,
     ):
         """
         EagleBackbone is to generate n_queries to represent the future action hidden states.
@@ -27,6 +27,8 @@ class EagleBackbone(torch.nn.Module):
             tune_llm: whether to tune the LLM model (default: False)
             tune_visual: whether to tune the visual model (default: False)
         """
+        if transformers_loading_kwargs is None:
+            transformers_loading_kwargs = {}
 
         super().__init__()
 

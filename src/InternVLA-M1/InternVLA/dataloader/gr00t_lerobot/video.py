@@ -24,8 +24,10 @@ def get_frames_by_indices(
     video_path: str,
     indices: list[int] | np.ndarray,
     video_backend: str = "decord",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
 ) -> np.ndarray:
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     assert video_backend_kwargs == {}, "video_backend_kwargs is not supported for now"
     assert video_backend == "decord", "Only decord backend is supported for now"
     if video_backend == "decord":
@@ -52,7 +54,7 @@ def get_frames_by_timestamps(
     video_path: str,
     timestamps: list[float] | np.ndarray,
     video_backend: str = "decord",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
     step_indices_for_assert: list[int] | np.ndarray = None,
 ) -> np.ndarray:
     """Get frames from a video at specified timestamps.
@@ -63,6 +65,8 @@ def get_frames_by_timestamps(
     Returns:
         np.ndarray: Frames at the specified timestamps.
     """
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     assert video_backend_kwargs == {}, "video_backend_kwargs is not supported for now"
     assert video_backend == "decord", "Only decord backend is supported for now"
     if video_backend == "decord":
@@ -143,7 +147,7 @@ def get_frames_by_timestamps(
 def get_all_frames(
     video_path: str,
     video_backend: str = "decord",
-    video_backend_kwargs: dict = {},
+    video_backend_kwargs: dict = None,
     resize_size: tuple[int, int] | None = None,
 ) -> np.ndarray:
     """Get all frames from a video.
@@ -153,6 +157,8 @@ def get_all_frames(
         video_backend_kwargs (dict, optional): Keyword arguments for the video backend.
         resize_size (tuple[int, int], optional): Resize size for the frames. Defaults to None.
     """
+    if video_backend_kwargs is None:
+        video_backend_kwargs = {}
     if video_backend == "decord":
         vr = decord.VideoReader(video_path, **video_backend_kwargs)
         frames = vr.get_batch(range(len(vr))).asnumpy()

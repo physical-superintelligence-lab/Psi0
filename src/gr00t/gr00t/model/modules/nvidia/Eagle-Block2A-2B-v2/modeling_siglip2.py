@@ -290,11 +290,13 @@ class Siglip2VisionConfig(PretrainedConfig):
         layer_norm_eps=1e-6,
         attention_dropout=0.0,
         window_size=14, # 
-        full_attention_indexes=[7, 14, 21, 26],
+        full_attention_indexes=None,
         use_rope=True,
         use_windows_attn=True,
         **kwargs,
     ):
+        if full_attention_indexes is None:
+            full_attention_indexes = []
         super().__init__(**kwargs)
 
         self.hidden_size = hidden_size

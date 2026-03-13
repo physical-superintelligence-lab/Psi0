@@ -35,7 +35,7 @@ class Config:
 
     def load(self, path: Path):
         """Load configuration from YAML file."""
-        data = yaml.load(path.read_text(), Loader=yaml.Loader)
+        data = yaml.safe_load(path.read_text(), Loader=yaml.Loader)
         if isinstance(data, dict):  # for training
             self.load_dict(data)
         elif isinstance(data, self.__class__):
@@ -65,7 +65,7 @@ class Config:
     @classmethod
     def from_pretrained(cls, path: Path) -> "Config":
         """Load configuration from YAML file."""
-        data = yaml.load(path.read_text(), Loader=yaml.Loader)
+        data = yaml.safe_load(path.read_text(), Loader=yaml.Loader)
         return data
 
     def get_deepspeed_config(self) -> dict:

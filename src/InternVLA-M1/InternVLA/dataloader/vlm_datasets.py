@@ -46,9 +46,11 @@ def read_jsonl(path):
 def preprocess_qwen_2_visual(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
-    grid_thw: List = [],
+    grid_thw: List = None,
     visual_type: str = "image",
 ) -> Dict:
+    if grid_thw is None:
+        grid_thw = []
     roles = {"human": "user", "gpt": "assistant"}
     system_message = "You are a helpful assistant."
     if visual_type not in ["image", "video"]:

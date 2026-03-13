@@ -985,9 +985,7 @@ class LeRobotMixtureDataset(Dataset):
         balance_dataset_weights: bool = True,
         balance_trajectory_weights: bool = True,
         seed: int = 42,
-        metadata_config: dict = {
-            "percentile_mixing_method": "min_max",
-        },
+        metadata_config: dict = None,
     ):
         """
         Initialize the mixture dataset.
@@ -999,6 +997,8 @@ class LeRobotMixtureDataset(Dataset):
             balance_trajectory_weights (bool): If True, sample trajectories within a dataset weighted by their length; otherwise, use equal weighting.
             seed (int): Random seed for sampling.
         """
+        if metadata_config is None:
+            metadata_config = {}
         datasets: list[LeRobotSingleDataset] = []
         dataset_sampling_weights: list[float] = []
         for dataset, weight in data_mixture:

@@ -138,7 +138,7 @@ def main():
                     "condition": None,
                     "timestamp": None,
                 }
-                resp = s.post(URL, json=payload)
+                resp = s.post(URL, json=payload, timeout=10.0)
                 resp.raise_for_status()
                 actions = np.array(resp.json()["action"], dtype=float)
                 if len(actions.shape) != 2 or actions.shape[1] != 36:

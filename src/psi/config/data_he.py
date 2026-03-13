@@ -10,7 +10,9 @@ class HERawDataConfig(DataConfig):
     use_delta_actions: bool = True
     upsample_rate: int = 1
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         from psi.data.humanoid.he_raw_dataset import HERawDataset
         from psi.data.dataset import Dataset as MapStyleDataset
         

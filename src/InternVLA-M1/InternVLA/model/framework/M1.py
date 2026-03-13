@@ -169,7 +169,7 @@ class InternVLA_M1(baseframework):
         cfg_scale: float = 1.5,
         use_ddim: bool = True,
         num_ddim_steps: int = 5,
-        resize_image = [224, 224],
+        resize_image = None,
         **kwargs: str,
     ) -> np.ndarray:
         """
@@ -195,6 +195,8 @@ class InternVLA_M1(baseframework):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
+        if resize_image is None:
+            resize_image = []
         # align obs and lang # is policy's duty to make sure the image size?
         train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
         print("resize image from:", batch_images[0][0].size)
@@ -299,7 +301,7 @@ class InternVLA_M1(baseframework):
         cfg_scale: float = 1.5,
         use_ddim: bool = True,
         num_ddim_steps: int = 5,
-        resize_image = [224, 224],
+        resize_image = None,
         prev_actions: np.ndarray = None,
         inference_delay: int = 0,
         execution_horizon: int = 0,
@@ -335,6 +337,8 @@ class InternVLA_M1(baseframework):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
+        if resize_image is None:
+            resize_image = []
         # align obs and lang # is policy's duty to make sure the image size?
         train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
         print("resize image from:", batch_images[0][0].size)
@@ -486,7 +490,7 @@ class InternVLA_M1(baseframework):
         return outputs
 
 
-def build_model_framework(config: dict = {}) -> InternVLA_M1:
+def build_model_framework(config: dict = None) -> InternVLA_M1:
     """
     Factory helper to build InternVLA_M1 with provided config.
 
@@ -496,6 +500,8 @@ def build_model_framework(config: dict = {}) -> InternVLA_M1:
     Returns:
         InternVLA_M1: Initialized model instance.
     """
+    if config is None:
+        config = {}
     model = InternVLA_M1(config=config)
     return model
 

@@ -62,9 +62,11 @@ class Gr00tN1d6DataCollator:
         self,
         model_name: str,
         model_type: Literal["eagle"] = "eagle",
-        transformers_loading_kwargs: dict = {},
+        transformers_loading_kwargs: dict = None,
     ):
         ### We need to use the same  processor for padding input ids and concat
+        if transformers_loading_kwargs is None:
+            transformers_loading_kwargs = {}
         self.processor = build_processor(model_name, transformers_loading_kwargs)
         # Set padding side to 'left' for Flash Attention compatibility
         self.processor.tokenizer.padding_side = "left"
@@ -134,8 +136,10 @@ class Gr00tN1d6Processor(BaseProcessor):
         use_albumentations: bool = False,
         use_relative_action: bool = False,
         embodiment_id_mapping: dict[str, int] | None = None,
-        transformers_loading_kwargs: dict = {"trust_remote_code": True},
+        transformers_loading_kwargs: dict = None,
     ):
+        if transformers_loading_kwargs is None:
+            transformers_loading_kwargs = {}
         self.modality_configs = parse_modality_configs(modality_configs)
 
         # Initialize StateActionProcessor for state/action normalization

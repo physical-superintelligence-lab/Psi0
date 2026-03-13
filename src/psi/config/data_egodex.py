@@ -12,7 +12,9 @@ class EgoDexDataConfig(DataConfig):
     use_delta_actions: bool = True
     load_retarget: bool = False
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         from psi.data.egodex.egodex_dataset import EgoDexDataset
         from psi.data.dataset import Dataset as MapStyleDataset
         # from psi.data.dataset import IterableDataset
@@ -30,7 +32,9 @@ class EgoDexDataConfig(DataConfig):
             self, dataset, transform_kwargs=transform_kwargs, **kwargs
         )
 
-    def mock(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def mock(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         dataset = self.__call__(split, transform_kwargs=transform_kwargs, **kwargs)
         # return dataset[0]
         n_samples = min(10, len(dataset))

@@ -131,7 +131,9 @@ class ServerConfig(BaseModel):
 class DataConfig(BaseModel):
     transform: DataTransform
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs=None, **kwargs) -> Any:
+        if transform_kwargs is None:
+            transform_kwargs = {}
         raise NotImplementedError
     
 class ModelConfig(BaseModel): 
