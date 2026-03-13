@@ -7,8 +7,8 @@
 
 <div align="center">
 
-[![arXiv](https://img.shields.io/badge/arXiv-2505.03233-df2a2a.svg)](https://arxiv.org/...)
-[![Static Badge](https://img.shields.io/badge/Project-Page-a)](...)
+[![arXiv](https://img.shields.io/badge/arXiv-2505.03233-df2a2a.svg)](https://arxiv.org/abs/2603.12263)
+[![Static Badge](https://img.shields.io/badge/Project-Page-a)](https://psi-lab.ai/Psi0)
 [![Model](https://img.shields.io/badge/Hugging%20Face-Model-yellow)](https://huggingface.co/songlinwei/psi-model)
 [![Data](https://img.shields.io/badge/Hugging%20Face-Data-pink)](https://huggingface.co/datasets/songlinwei/psi-data)
 [![License](https://img.shields.io/badge/License-Apache2.0-blue.svg)](./LICENSE)
