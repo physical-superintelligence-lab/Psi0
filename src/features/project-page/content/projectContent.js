@@ -170,8 +170,11 @@ export const projectPageContent = {
     actions: [
       { label: "Watch Demos", href: "#demos" },
       { label: "Paper", href: "https://arxiv.org/abs/2603.12263" },
-      { label: "Model", href: "https://huggingface.co/songlinwei/psi-model" },
-      { label: "Data", href: "https://huggingface.co/datasets/songlinwei/psi-data" },
+      { label: "Model", href: "https://huggingface.co/usc-psi-lab/psi-model" },
+      {
+        label: "Data",
+        href: "https://huggingface.co/datasets/usc-psi-lab/psi-data",
+      },
       {
         label: "Code",
         href: "https://github.com/physical-superintelligence-lab/Psi0",
