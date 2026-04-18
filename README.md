@@ -420,7 +420,7 @@ export agent=psi0_decoupled_wbc
 and set entrypoint and agent to `eval.py` and `psi0` if the evaluating task ends with `MP`, which means the task data is generated using CuRobo Motion planning:
 ```
 export entry=eval.py
-export entry=psi0
+export agent=psi0
 ```
 
 ```
