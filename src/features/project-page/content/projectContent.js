@@ -87,6 +87,7 @@ const withBase = (path) => {
  * @typedef {{
  *   eyebrow: EyebrowLink;
  *   title: string;
+ *   venue?: string;
  *   authors: string[];
  *   authorNote: string;
  *   affiliations: string[];
@@ -151,6 +152,7 @@ export const projectPageContent = {
     },
     title:
       "Ψ₀: An Open Foundation Model Towards Universal Humanoid Loco-Manipulation",
+    venue: "Accepted to RSS 2026",
     authors: [
       '<a href="https://songlin.github.io/" target="_blank" rel="noreferrer">Songlin Wei</a><sup>1*</sup>',
       '<a href="https://hongyijing.me/" target="_blank" rel="noreferrer">Hongyi Jing</a><sup>1*</sup>',

@@ -9,6 +9,7 @@ const { hero } = Astro.props;
       </a>
     </p>
     <h1>{hero.title}</h1>
+    {hero.venue && <p class="hero-venue">{hero.venue}</p>}
     <div class="authors-inline">
       {hero.authors.map((author) => (
         <span set:html={author}></span>
