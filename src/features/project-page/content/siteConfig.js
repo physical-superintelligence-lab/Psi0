@@ -26,4 +26,5 @@ export const tableOfContents = [
   { id: "demos", label: "Demos" },
   { id: "method", label: "Method" },
   { id: "experiments", label: "Experiments" },
+  { id: "citation", label: "Cite" },
 ];

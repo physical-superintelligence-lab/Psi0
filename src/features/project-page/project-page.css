@@ -1181,6 +1181,58 @@
   text-align: left;
 }
 
+.citation-section-head {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.citation-panel {
+  border-radius: 18px;
+  border: 1px solid rgba(76, 79, 105, 0.08);
+  background: rgba(252, 249, 245, 0.72);
+  padding: 12px;
+}
+
+.citation-bibtex-wrap {
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(76, 79, 105, 0.1);
+  background: rgba(255, 252, 247, 0.82);
+}
+
+.citation-copy-button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(76, 79, 105, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.72);
+  color: var(--subtext0);
+  font-family: "IBM Plex Mono", "Space Mono", "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.citation-copy-button:focus-visible {
+  outline: 2px solid rgba(76, 79, 105, 0.24);
+  outline-offset: 3px;
+}
+
+.citation-bibtex {
+  margin: 0;
+  padding: 16px;
+  overflow-x: auto;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "Space Mono", "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 @media (min-width: 1400px) {
   .page {
     max-width: 1220px;

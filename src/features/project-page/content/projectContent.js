@@ -136,6 +136,12 @@ const withBase = (path) => {
  *       rows: Record<string, string>[];
  *     };
  *   };
+ *   citation: {
+ *     sectionTitle: string;
+ *     copyLabel: string;
+ *     copiedLabel: string;
+ *     bibtex: string;
+ *   };
  *   footer: {
  *     sourceCodeLabel: string;
  *   };
@@ -186,6 +192,7 @@ export const projectPageContent = {
         href: "https://arxiv.org/abs/2603.12263",
         external: true,
       },
+      { label: "Cite", href: "#citation" },
       {
         label: "Model",
         href: "https://huggingface.co/usc-psi-lab/psi-model",
@@ -694,6 +701,17 @@ export const projectPageContent = {
         },
       ],
     },
+  },
+  citation: {
+    sectionTitle: "Cite",
+    copyLabel: "Copy",
+    copiedLabel: "Copied",
+    bibtex: `@article{wei2026psi0,
+  title={{$\\Psi_0$}: An Open Foundation Model Towards Universal Humanoid Loco-Manipulation},
+  author={Wei, Songlin and Jing, Hongyi and Li, Boqian and Zhao, Zhenyu and Mao, Jiageng and Ni, Zhenhao and He, Sicheng and Liu, Jie and Liu, Xiawei and Kang, Kaidi and others},
+  journal={arXiv preprint arXiv:2603.12263},
+  year={2026}
+}`,
   },
   footer: {
     sourceCodeLabel: "Website Source Code",

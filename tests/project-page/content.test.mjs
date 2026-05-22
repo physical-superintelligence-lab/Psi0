@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { projectPageContent } from "../../src/features/project-page/content/projectContent.js";
-import { demoLayout, footerConfig } from "../../src/features/project-page/content/siteConfig.js";
+import { demoLayout, footerConfig, tableOfContents } from "../../src/features/project-page/content/siteConfig.js";
 
 const repoRoot = process.cwd();
 
@@ -17,6 +17,7 @@ test("project page content exposes the expected top-level sections", () => {
     "demos",
     "method",
     "experiments",
+    "citation",
     "footer",
   ]);
 });
@@ -28,6 +29,7 @@ test("hero content is populated and action links are present", () => {
   assert.ok(hero.affiliations.length >= 1);
   assert.ok(hero.actions.length >= 2);
   assert.equal(hero.actions.some((action) => action.label === "SIMPLE"), true);
+  assert.equal(hero.actions.some((action) => action.label === "Cite" && action.href === "#citation"), true);
   assert.equal(hero.repoStats.length, 2);
   for (const action of hero.actions) {
     assert.ok(action.label.length > 0);
@@ -93,6 +95,15 @@ test("experiment tables match their declared columns", () => {
   }
 });
 
+test("citation content exposes BibTeX for the paper", () => {
+  const { citation } = projectPageContent;
+  assert.equal(citation.sectionTitle, "Cite");
+  assert.deepEqual(Object.keys(citation), ["sectionTitle", "copyLabel", "copiedLabel", "bibtex"]);
+  assert.match(citation.bibtex, /^@article\{wei2026psi0,/);
+  assert.match(citation.bibtex, /arXiv preprint arXiv:2603\.12263/);
+  assert.match(citation.bibtex, /year=\{2026\}/);
+});
+
 test("referenced public assets exist", () => {
   const assetPaths = new Set([
     projectPageContent.hero.teaserVideoSrc,
@@ -124,4 +135,5 @@ test("shared carousel layout remains centralized in siteConfig", () => {
     assert.ok(value.length > 0);
   }
   assert.match(footerConfig.copyright, /^Copyright/);
+  assert.equal(tableOfContents.some((item) => item.id === "citation" && item.label === "Cite"), true);
 });

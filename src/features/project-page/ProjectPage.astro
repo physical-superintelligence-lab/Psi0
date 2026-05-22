@@ -8,6 +8,7 @@ import AbstractSection from "./components/AbstractSection.astro";
 import DemosSection from "./components/DemosSection.astro";
 import MethodSection from "./components/MethodSection.astro";
 import ExperimentsSection from "./components/ExperimentsSection.astro";
+import CitationSection from "./components/CitationSection.astro";
 ---
 <Base title="Ψ₀: An Open Foundation Model Towards Universal Humanoid Loco-Manipulation">
   <main class="page">
@@ -36,6 +37,7 @@ import ExperimentsSection from "./components/ExperimentsSection.astro";
         <ExperimentsSection
           experiments={projectPageContent.experiments}
         />
+        <CitationSection citation={projectPageContent.citation} />
         <footer class="site-footer">
           <p>{footerConfig.copyright}</p>
           <a href={projectPageContent.footer.sourceCodeHref}>{projectPageContent.footer.sourceCodeLabel}</a>

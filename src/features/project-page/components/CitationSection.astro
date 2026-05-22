@@ -1,0 +1,59 @@
+---
+const { citation } = Astro.props;
+---
+<section id="citation" class="section citation-section">
+  <header class="section-head citation-section-head">
+    <h2>{citation.sectionTitle}</h2>
+    <button
+      class="citation-copy-button"
+      type="button"
+      data-copy-citation
+      data-copied-label={citation.copiedLabel}
+    >
+      <span data-copy-label>{citation.copyLabel}</span>
+    </button>
+  </header>
+  <article class="citation-panel">
+    <div class="citation-bibtex-wrap">
+      <pre class="citation-bibtex"><code data-citation-bibtex>{citation.bibtex}</code></pre>
+    </div>
+  </article>
+</section>
+
+<script is:inline>
+  const bindCitationCopy = () => {
+    const button = document.querySelector("[data-copy-citation]");
+    const code = document.querySelector("[data-citation-bibtex]");
+    const label = button?.querySelector("[data-copy-label]");
+    if (!button || !code || !label) return;
+
+    const defaultLabel = label.textContent;
+    const copiedLabel = button.dataset.copiedLabel || "Copied";
+
+    button.addEventListener("click", async () => {
+      const text = code.textContent.trim();
+
+      try {
+        await navigator.clipboard.writeText(text);
+        label.textContent = copiedLabel;
+      } catch {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        label.textContent = "Selected";
+      }
+
+      window.setTimeout(() => {
+        label.textContent = defaultLabel;
+      }, 1600);
+    });
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bindCitationCopy, { once: true });
+  } else {
+    bindCitationCopy();
+  }
+</script>
