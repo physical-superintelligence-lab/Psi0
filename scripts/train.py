@@ -221,7 +221,7 @@ def train(config: LaunchConfig):
     progress_bar = tqdm(
         range(0, trainer.max_training_steps),
         initial=initial_global_step,
-        desc="Traing steps",
+        desc="Training steps",
         disable=not overwatch.is_rank_zero(),
         position=0,
     )
