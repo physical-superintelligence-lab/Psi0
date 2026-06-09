@@ -210,7 +210,7 @@ export const projectPageContent = {
       },
       {
         label: "SIMPLE",
-        href: "https://github.com/physical-superintelligence-lab/SIMPLE",
+        href: "https://psi-lab.ai/SIMPLE/",
         external: true,
       },
     ],
@@ -710,6 +710,13 @@ export const projectPageContent = {
   title={{$\\Psi_0$}: An Open Foundation Model Towards Universal Humanoid Loco-Manipulation},
   author={Wei, Songlin and Jing, Hongyi and Li, Boqian and Zhao, Zhenyu and Mao, Jiageng and Ni, Zhenhao and He, Sicheng and Liu, Jie and Liu, Xiawei and Kang, Kaidi and others},
   journal={arXiv preprint arXiv:2603.12263},
+  year={2026}
+}
+
+@article{wei2026simple,
+  title={SIMPLE: Simulation-Based Policy Learning and Evaluation for Humanoid Loco-manipulation},
+  author={Wei, Songlin and Ni, Zhenhao and Liu, Jie and Zhao, Zhenyu and Ye, Junjie and Jing, Hongyi and Xia, Junkai and Liu, Xiawei and Leong, Michael and Heng, Liang and Huang, Di and Wang, Yue},
+  journal={arXiv preprint arXiv:2606.08278},
   year={2026}
 }`,
   },
