@@ -203,28 +203,18 @@ export const projectPageContent = {
         href: "https://huggingface.co/datasets/usc-psi-lab/psi-data",
         external: true,
       },
-      {
-        label: "Code",
-        href: "https://github.com/physical-superintelligence-lab/Psi0",
-        external: true,
-      },
-      {
-        label: "SIMPLE",
-        href: "https://psi-lab.ai/SIMPLE/",
-        external: true,
-      },
     ],
     repoStats: [
       {
-        label: "Ψ₀ GitHub Stars",
-        href: "https://github.com/physical-superintelligence-lab/Psi0/stargazers",
+        label: "Code — Ψ₀ GitHub repository stars",
+        href: "https://github.com/physical-superintelligence-lab/Psi0",
         repoOwner: "physical-superintelligence-lab",
         repoName: "Psi0",
-        shortLabel: "Ψ₀",
+        shortLabel: "Code",
       },
       {
-        label: "SIMPLE GitHub Stars",
-        href: "https://github.com/physical-superintelligence-lab/SIMPLE/stargazers",
+        label: "SIMPLE — project page and GitHub stars",
+        href: "https://psi-lab.ai/SIMPLE/",
         repoOwner: "physical-superintelligence-lab",
         repoName: "SIMPLE",
         shortLabel: "SIMPLE",

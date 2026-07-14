@@ -28,7 +28,7 @@ test("hero content is populated and action links are present", () => {
   assert.ok(hero.authors.length >= 3);
   assert.ok(hero.affiliations.length >= 1);
   assert.ok(hero.actions.length >= 2);
-  assert.equal(hero.actions.some((action) => action.label === "SIMPLE"), true);
+  assert.equal(hero.repoStats.some((repo) => repo.shortLabel === "SIMPLE"), true);
   assert.equal(hero.actions.some((action) => action.label === "Cite" && action.href === "#citation"), true);
   assert.equal(hero.repoStats.length, 2);
   for (const action of hero.actions) {
