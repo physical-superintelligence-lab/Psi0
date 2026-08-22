@@ -344,7 +344,9 @@ class SonicTrainer(Trainer):
                     # NOTE: It is normal that param.grad is None for deepspeed and fsdp
                     for name, param in self.model.named_parameters():
                         if param.requires_grad and param.grad is None:
-                            overwatch.critical(f"[Unused] {name} did not receive a gradient.")  
+                            overwatch.critical(f"[Unused] {name} did not receive a gradient.")
+            else:
+                self._grad_norm_act = 0.0
 
             self.optimizer.step()
             self.lr_scheduler.step()
