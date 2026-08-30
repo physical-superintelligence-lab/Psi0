@@ -1,0 +1,10 @@
+SECRETS_ARN=arn:aws:secretsmanager:us-east-2:556885871428:secret:rds/appdb/appuser-readonly-9yaQpr
+R2_ACCESS_KEY_ID=5992dc70632787166361390693a83383
+R2_SECRET_ACCESS_KEY=1105199e4a4f64d6b1e23d84b747f40ae9503e4ed006e6b509caca93bfb065c4
+R2_SESSION_TOKEN=FBlvy2wm8YODycrI07gvghKyGkABdkfCNBcqsrd0
+AWS_ENDPOINT_URL_S3=https://1beb594fb475d71c4420f7b693524e19.r2.cloudflarestorage.com
+R2_ENDPOINT_URL=https://1beb594fb475d71c4420f7b693524e19.r2.cloudflarestorage.com
+S3_ENDPOINT_URL=https://1beb594fb475d71c4420f7b693524e19.r2.cloudflarestorage.com
+AWS_DEFAULT_REGION=us-east-2
+BUCKET=rldb
+#EGOVERSE_SOCKS5=socks5://127.0.0.1:7891

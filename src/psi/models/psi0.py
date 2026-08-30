@@ -7,6 +7,7 @@ from typing_extensions import Self
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 from PIL import Image
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ QWEN3VL_VARIANT = "Qwen/Qwen3-VL-2B-Instruct"
 @dataclass
 class HumanFoundationModelOutput(BaseOutput):
     action: "torch.Tensor"  # noqa: F821
+    # Mean per-token L2 norm of the VLM feature fed to the action header (for logging).
+    vlm_feat_norm: Optional["torch.Tensor"] = None  # noqa: F821
 
     def to_tuple(self):
         return (None, self.action)
@@ -75,9 +78,35 @@ class _TimeNetwork(nn.Module):
     def forward(self, x):
         # assert len(x.shape) == 1, "assumes 1d input timestep array"
         # RTC: support 2D timesteps (B,Tp)
-        x = x[..., None] * self.w 
-        x = torch.cat((torch.cos(x), torch.sin(x)), dim=-1) 
-        return self.out_net(x) 
+        x = x[..., None] * self.w
+        x = torch.cat((torch.cos(x), torch.sin(x)), dim=-1)
+        return self.out_net(x)
+
+class CombinedTimestepTextProjEmbeddingsND(CombinedTimestepTextProjEmbeddings):
+    """`combined_temb` embedding that also accepts a per-token timestep `(B, Tp)` (RTC).
+
+    diffusers' `time_proj` (get_timestep_embedding) is 1-D only, so a `(B, Tp)` timestep
+    would crash the base class. Here we flatten -> embed -> reshape and add the pooled
+    (per-sample) instruction projection broadcast over the token axis:
+
+        temb[b, i] = timestep_embed(t[b, i]) + pooled_proj(x[b])
+
+    A 1-D `(B,)` timestep reproduces the base class exactly. Submodule names/params are
+    unchanged, so existing combined_temb checkpoints load as-is.
+    """
+
+    def forward(self, timestep: torch.Tensor, pooled_projection: torch.Tensor) -> torch.Tensor:
+        pooled = self.text_embedder(pooled_projection)  # (B, D)
+        if timestep.dim() == 1:                          # (B,) -> (B, D)  [base-class path]
+            proj = self.time_proj(timestep)
+            temb = self.timestep_embedder(proj.to(dtype=pooled_projection.dtype))
+            return temb + pooled
+        elif timestep.dim() == 2:                        # (B, Tp) -> (B, Tp, D)  [RTC]
+            B, T = timestep.shape
+            proj = self.time_proj(timestep.reshape(B * T))
+            temb = self.timestep_embedder(proj.to(dtype=pooled_projection.dtype))
+            return temb.reshape(B, T, -1) + pooled.unsqueeze(1)
+        raise ValueError(f"timestep must be 1-D or 2-D, got shape {tuple(timestep.shape)}")
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps: float, elementwise_affine: bool = True):
@@ -620,11 +649,23 @@ class ObservationProjection(nn.Module): # FIXME naming
             `Tuple`[`torch.Tensor`, `torch.Tensor`]: The pair (latents, timestep_emb).
         """
         # DiffusionTransformerAgent.forward
-        s_t, vlm_attn_mask = self.tokenize_obs(views, obs, traj2ds, text_embeddings=text_embeddings, vlm_attn_mask=vlm_attn_mask) # (B, S, d_model)
+        vlm_token_len = views.shape[1] * views.shape[2]  # V*S VLM tokens, right-padded
+        s_t, out_attn_mask = self.tokenize_obs(views, obs, traj2ds, text_embeddings=text_embeddings, vlm_attn_mask=vlm_attn_mask) # (B, S, d_model)
         # _DiTNoiseNet.forward_enc
         s_t = s_t.transpose(0, 1) # (S, B, d_model)
-        pos = self.enc_pos(s_t) # (S, B, d_model)
-        return (s_t + pos).transpose(0,1), vlm_attn_mask # (B,S,d_model)
+        s_t = self._add_obs_pos(s_t, vlm_token_len) # (S, B, d_model)
+        return s_t.transpose(0,1), out_attn_mask # (B,S,d_model)
+
+    def _add_obs_pos(self, s_t, vlm_token_len):
+        """Positional encoding for the [VLM tokens ..., obs token(s)] sequence.
+            Only the observation tokens receive positional encodings. 
+            The VLM tokens retain their original positions as determined by the VLM's own positional encoding.
+        """
+        n_obs = s_t.shape[0] - vlm_token_len
+        if n_obs <= 0:
+            return s_t
+        obs_pos = self.enc_pos.pe[:n_obs].to(s_t.dtype)  # (n_obs, 1, d_model)
+        return torch.cat([s_t[:vlm_token_len], s_t[vlm_token_len:] + obs_pos], dim=0)
 
     def tokenize_obs(self, views, obs, traj2ds = None, flatten=False, text_embeddings=None, vlm_attn_mask=None):
         
@@ -680,7 +721,11 @@ class ObservationProjection(nn.Module): # FIXME naming
         if self._obs_strat == "add_token":
             obs_token = self._obs_proc(obs)#[:, None]
             tokens = torch.cat((tokens, obs_token), 1)
-            vlm_attn_mask = torch.cat([vlm_attn_mask, torch.ones((vlm_attn_mask.shape[0], 1), device=vlm_attn_mask.device)], 1) if vlm_attn_mask is not None else None
+            obs_token_len = obs_token.shape[1]
+            vlm_attn_mask = (
+                torch.cat([vlm_attn_mask, torch.ones((B, obs_token_len), device=vlm_attn_mask.device)], 1) 
+                if vlm_attn_mask is not None else None
+            )
         elif self._obs_strat == "pad_img_tokens":
             obs = self._obs_proc(obs)
             obs = obs[:, None].repeat((1, tokens.shape[1], 1))
@@ -782,13 +827,20 @@ class ActionProjectionIn(nn.Module):
     
 
 class ActionProjectionOut(nn.Module): # _FinalLayer
-    def __init__(self, hidden_size, action_dim):
+    def __init__(self, hidden_size, action_dim, final_layer_norm: bool = True):
         super().__init__()
+        self.final_layer_norm = final_layer_norm
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, action_dim, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
+        if final_layer_norm:
+            # DiT convention: zero-init the modulation so the head starts as a
+            # plain LayerNorm (scale=shift=0 -> x*(1+0)+0) instead of a random
+            # unbounded gate.
+            nn.init.zeros_(self.adaLN_modulation[-1].weight)
+            nn.init.zeros_(self.adaLN_modulation[-1].bias)
         # self.reset_parameters()
 
     def forward(self, x, t, cond=None):
@@ -803,8 +855,14 @@ class ActionProjectionOut(nn.Module): # _FinalLayer
         else:
             raise ValueError(f"Invalid shape of t: {t.shape}")
         shift, scale = self.adaLN_modulation(t).chunk(2, dim=-1) # cond -> t
-        # x = self.norm_final(x) * (1+scale[None]) + shift[None] # TODO be careful!
-        x = x * scale + shift
+        if self.final_layer_norm:
+            x = self.norm_final(x) * (1 + scale) + shift
+        else:
+            # Legacy head: the unnormalized residual stream times an unbounded
+            # gate, with no identity path. d(loss)/dx scales with `scale` and
+            # vice versa, so the two grow into each other -- this is what could drive
+            # the grad-norm blowups.
+            x = x * scale + shift
         x = self.linear(x)
         # return x.transpose(0, 1)
         return x
@@ -1080,17 +1138,21 @@ class ActionTransformerModel(
         odim: int = 32,
         view_feature_dim: int = 1920,
         use_film: bool = False,
-        combined_temb: bool = False
+        combined_temb: bool = False,
+        final_layer_norm: bool = True,
+        layerwise_vlm_fusion: bool = False,
+        state_drop_prob: float = 0.0,
     ):
         super().__init__()
         # self.inner_dim = num_attention_heads * attention_head_dim
-        self.inner_dim = num_attention_heads * attention_head_dim 
+        self.inner_dim = num_attention_heads * attention_head_dim
 
+        self.state_drop_prob = state_drop_prob
         self.combined_temb = combined_temb
         if self.combined_temb:
-            self.time_ins_embed = CombinedTimestepTextProjEmbeddings(
+            self.time_ins_embed = CombinedTimestepTextProjEmbeddingsND(
                 embedding_dim=self.inner_dim, pooled_projection_dim=pooled_projection_dim
-            ) # used
+            ) # used; ND variant also accepts per-token (B,Tp) timesteps for RTC
         else:
             self.time_ins_embed = _TimeNetwork(time_dim=256, out_dim=action_hidden_dim)
         """ self.lang_embedder = nn.Linear(joint_attention_dim, caption_projection_dim) """
@@ -1127,7 +1189,10 @@ class ActionTransformerModel(
                     dim=action_hidden_dim,
                     num_attention_heads=action_nheads,
                     attention_head_dim=attention_head_dim,
-                    context_pre_only=i == action_num_blocks - 1,
+                    # layerwise VLM fusion feeds each block a fresh VLM layer and discards the obs
+                    # output, so make every block context_pre_only (obs = KV-only): no obs
+                    # FF / to_add_out. Otherwise only the last block is context_pre_only.
+                    context_pre_only=(layerwise_vlm_fusion or i == action_num_blocks - 1),
                     qk_norm=qk_norm,
                     # use_dual_attention=True if i in dual_attention_layers else False,
                     training_phase=training_phase,  # "joint", "action", "traj2d", "action_mini"
@@ -1139,8 +1204,9 @@ class ActionTransformerModel(
         logger.debug(f"ActionTransformerBlock parameters: {total_params:,}")
 
         self.action_proj_out = ActionProjectionOut(
-            hidden_size=action_hidden_dim, 
-            action_dim=action_dim
+            hidden_size=action_hidden_dim,
+            action_dim=action_dim,
+            final_layer_norm=final_layer_norm
         )
         total_params = sum(p.numel() for p in self.action_proj_out.parameters())
         logger.debug(f"ActionProjectionOut parameters: {total_params:,}")
@@ -1174,31 +1240,64 @@ class ActionTransformerModel(
         noisy_action = joint_attention_kwargs.pop("action_hidden_embeds")
         action_hidden_states = self.action_proj_in(noisy_action)
 
-        # Obs: V+Proprio
-        obs_hidden_states, obs_token_mask = self.obs_proj(
-            views=joint_attention_kwargs["views"],
-            obs=joint_attention_kwargs["obs"],
-            traj2ds=joint_attention_kwargs["traj2ds"],
-            text_embeddings=pooled_projections,
-            vlm_attn_mask=vlm_attn_mask
-        ) # S, B, d_model
-        
+        # Obs: V+Proprio. views is (B, V, N, D): V==1 -> single last-layer context that
+        # evolves through the blocks (default); V==n_blocks -> layerwise VLM fusion, block i gets
+        # its own VLM layer as a FRESH context (tokenized per layer, obs not carried).
+        views = joint_attention_kwargs["views"]
+
+        # Random state dropout
+        obs = joint_attention_kwargs["obs"]
+        if self.training and self.state_drop_prob > 0.0:
+            keep = (torch.rand(obs.shape[0], device=obs.device) >= self.state_drop_prob)
+            obs = obs * keep.view(obs.shape[0], *([1] * (obs.dim() - 1))).to(obs.dtype)
+
+        layerwise_vlm_fusion = views.shape[1] > 1
+        if layerwise_vlm_fusion:
+            assert views.shape[1] == len(self.transformer_blocks), (
+                f"layerwise VLM fusion views has {views.shape[1]} layers != {len(self.transformer_blocks)} blocks"
+            )
+            per_block_obs = []
+            obs_token_mask = None
+            for i in range(views.shape[1]):
+                obs_i, obs_token_mask = self.obs_proj(
+                    views=views[:, i:i + 1],
+                    obs=obs,
+                    traj2ds=joint_attention_kwargs["traj2ds"],
+                    text_embeddings=pooled_projections,
+                    vlm_attn_mask=vlm_attn_mask,
+                )
+                per_block_obs.append(obs_i)
+            obs_hidden_states = per_block_obs[0]
+        else:
+            obs_hidden_states, obs_token_mask = self.obs_proj(
+                views=views,
+                obs=obs,
+                traj2ds=joint_attention_kwargs["traj2ds"],
+                text_embeddings=pooled_projections,
+                vlm_attn_mask=vlm_attn_mask
+            ) # S, B, d_model
+
         for index_block, block in enumerate(self.transformer_blocks):
             is_skip = True if skip_layers is not None and index_block in skip_layers else False
             if is_skip:
                 continue
 
-            action_hidden_states, obs_hidden_states = block(
+            # layerwise VLM fusion: feed this block its own VLM layer's fresh context and discard
+            # the bidirectionally-updated obs (each block re-anchors to its VLM layer).
+            obs_in = per_block_obs[index_block] if layerwise_vlm_fusion else obs_hidden_states
+            action_hidden_states, obs_out = block(
                 # hidden_states=hidden_states, # V
                 # lang_hidden_states=lang_hidden_states, # L
                 action_hidden_states=action_hidden_states, # A
-                obs_hidden_states=obs_hidden_states, # O
+                obs_hidden_states=obs_in, # O
                 temb=temb,
                 obs_token_mask=obs_token_mask
                 # time_enc=time_enc,
                 # obs_pos_emb=obs_pos_emb,
                 # joint_attention_kwargs=joint_attention_kwargs,
             )
+            if not layerwise_vlm_fusion:
+                obs_hidden_states = obs_out
 
         action_output = self.action_proj_out(
             x=action_hidden_states,
@@ -1492,6 +1591,8 @@ class Psi0Model(nn.Module):
                 use_film=model_cfg.use_film,
                 combined_temb=model_cfg.combined_temb,
                 action_hidden_dim=model_cfg.hidden_dim,
+                action_num_blocks=model_cfg.num_blocks,
+                pooled_projection_dim=model_cfg.pooled_projection_dim,
             )
         else:
             self.action_header = ActionTransformerModel(
@@ -1503,8 +1604,13 @@ class Psi0Model(nn.Module):
                 use_film=model_cfg.use_film,
                 combined_temb=model_cfg.combined_temb,
                 action_hidden_dim=model_cfg.hidden_dim,
+                action_num_blocks=model_cfg.num_blocks,
+                final_layer_norm=model_cfg.final_layer_norm,
+                qk_norm=model_cfg.qk_norm,
+                pooled_projection_dim=model_cfg.pooled_projection_dim,
+                layerwise_vlm_fusion=model_cfg.vlm_layer_indices is not None,
+                state_drop_prob=model_cfg.state_drop_prob,
             )
-
 
         total_params = sum(p.numel() for p in self.action_header.parameters())
         overwatch.info(f"Total ActionTransformerModel parameters: {total_params:,}")
@@ -1512,6 +1618,17 @@ class Psi0Model(nn.Module):
         self.vlm_model = vlm_model
         total_params = sum(p.numel() for p in self.vlm_model.parameters())
         overwatch.info(f"Total VLM Backbone parameters: {total_params:,}")
+
+        # Depth-matched conditioning: one VLM layer per action block. None -> last layer only.
+        self.vlm_layer_indices = getattr(model_cfg, "vlm_layer_indices", None)
+        if self.vlm_layer_indices is not None:
+            assert not model_cfg.use_dit, "layerwise VLM fusion (vlm_layer_indices) is only supported for ActionTransformerModel (use_dit=False)"
+            n_blocks = len(self.action_header.transformer_blocks)
+            assert len(self.vlm_layer_indices) == n_blocks, (
+                f"vlm_layer_indices has {len(self.vlm_layer_indices)} entries but the action "
+                f"header has {n_blocks} blocks; they must match (one VLM layer per block)"
+            )
+            overwatch.info(f"Depth-matched VLM conditioning: block->layer map {self.vlm_layer_indices}")
 
     # load pretrained vlm+action head, and all the modules needed for predict_action
     @classmethod
@@ -1607,6 +1724,20 @@ class Psi0Model(nn.Module):
         model.action_dim = launch_config.model.action_dim
         model.device = device
         return model
+    
+    def _select_vlm_views(self, all_hidden_states) -> torch.Tensor:
+        """Stack the VLM hidden states that condition the action header.
+
+        Default (vlm_layer_indices is None): just the last layer -> (B, 1, N, D), fed to
+        every action block (current behaviour). Depth-matched: one VLM layer per action
+        block -> (B, n_blocks, N, D), so block i attends to VLM layer vlm_layer_indices[i]
+        (openpi-style progressive features). `all_hidden_states` is the VLM's
+        output_hidden_states tuple (index 0 = embeddings, 1..L = layers, -1 = last).
+        """
+        if self.vlm_layer_indices is None:
+            return all_hidden_states[-1].unsqueeze(1)
+        return torch.stack([all_hidden_states[i] for i in self.vlm_layer_indices], dim=1)
+
     def forward(
         self,
         input_ids,
@@ -1617,34 +1748,59 @@ class Psi0Model(nn.Module):
         states: torch.Tensor,
         timestep: torch.LongTensor,
         traj2ds: Optional[torch.Tensor] = None,
+        pooled_projections: Optional[torch.Tensor] = None,
         return_dict: bool = True,
         skip_layers: Optional[List[int]] = None,
-    ) -> Union[List[torch.Tensor], HumanFoundationModelOutput]: 
+    ) -> Union[List[torch.Tensor], HumanFoundationModelOutput]:
 
-        # extract vision + language features
-        vlm_hidden_states = self.vlm_model(
+        # extract vision + language features (keep all layers for layerwise VLM fusion conditioning)
+        all_hidden_states = self.vlm_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             output_hidden_states=True,
             return_dict=True
-        ).hidden_states[-1]
-        # print(vlm_hidden_states.shape)
+        ).hidden_states
+        vlm_hidden_states = all_hidden_states[-1]     # last layer, for logging (norm)
+        views = self._select_vlm_views(all_hidden_states)  # (B, V, N, D): V=1 or n_blocks
+
+        # Mean per-token L2 norm of the VLM feature right before it is handed to the
+        # action header, for logging/monitoring. Detached + fp32; masked to valid tokens
+        # (pads carry non-zero norm) when the attention mask lines up.
+        with torch.no_grad():
+            tok_norm = vlm_hidden_states.detach().float().norm(dim=-1)  # (B, N)
+            if attention_mask is not None and attention_mask.shape == tok_norm.shape:
+                m = attention_mask.to(tok_norm.dtype)
+                vlm_feat_norm = (tok_norm * m).sum() / m.sum().clamp_min(1.0)
+            else:
+                vlm_feat_norm = tok_norm.mean()
 
         model_output = self.action_header(
             hidden_states=None,
             timestep=timestep,
+            pooled_projections=pooled_projections,  # (B, pooled_projection_dim), for combined_temb
             joint_attention_kwargs=dict(
                 action_hidden_embeds=action_samples, # (B,Tp,Da)
-                views=vlm_hidden_states.unsqueeze(1),  # (B,V,N,D)
+                views=views,  # (B,V,N,D)  V=1 (last layer) or n_blocks (layerwise VLM fusion)
                 obs=states,  # (B,1,M)
                 traj2ds=traj2ds,  # (B, C, 3, H, W)
             ),
             vlm_attn_mask=attention_mask, # (B, seq_len)
             return_dict=return_dict,
         )
-        return HumanFoundationModelOutput(action=model_output.action)
+        return HumanFoundationModelOutput(action=model_output.action, vlm_feat_norm=vlm_feat_norm)
+
+    def _collate_vlm_batch(self, batch_input_ids: List[torch.Tensor]):
+        """Right-pad mixed-length samples like training's PaddedCollatorForTogether
+        (trainers/qwen3vl_mixin.py); the mask must also reach the action header as
+        `vlm_attn_mask` or it attends over the pads. Padding shifts the obs token's position
+        index, so a batched sample is not bit-identical to a solo one (measured harmless).
+        """
+        pad_id = self.vlm_processor.tokenizer.pad_token_id
+        assert pad_id is not None, "tokenizer has no pad_token_id; cannot pad a mixed batch"
+        input_ids = pad_sequence(batch_input_ids, batch_first=True, padding_value=pad_id)
+        return input_ids, input_ids.ne(pad_id)
 
     @torch.inference_mode()
     def predict_action(
@@ -1653,7 +1809,9 @@ class Psi0Model(nn.Module):
         states: torch.Tensor, # (B, Ts, Ds)
         instructions: List[str], # (B,)
         num_inference_steps: int,
-        traj2ds, 
+        traj2ds,
+        goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
+        pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
         **kwargs: str
     ) -> torch.Tensor:
 
@@ -1664,10 +1822,14 @@ class Psi0Model(nn.Module):
         batch_image_grid_thw = []
 
 
-        for observation, instruction in zip(observations, instructions):
+        for b, (observation, instruction) in enumerate(zip(observations, instructions)):
             messages = []
             content = [{"type": "image", "image": img} for img in observation]
             content.append({"type": "text", "text": instruction})
+            # Match training (PsixModelTransform.build_qwenvl_inputs): goal image(s)
+            # are appended AFTER the instruction text.
+            if goal_images is not None and goal_images[b] is not None:
+                content.extend({"type": "image", "image": img} for img in goal_images[b])
             user_msg = {"role": "user", "content": content}
             messages.append([user_msg])
             texts = [
@@ -1691,12 +1853,18 @@ class Psi0Model(nn.Module):
             batch_input_ids.append(inputs['input_ids'].squeeze(0))
             batch_attention_mask.append(inputs['attention_mask'].squeeze(0))
             batch_pixel_values.append(inputs['pixel_values'])
-            batch_image_grid_thw.append(inputs['image_grid_thw'].squeeze(0))
+            batch_image_grid_thw.append(inputs['image_grid_thw'])
 
-        batch_input_ids = torch.stack(batch_input_ids) # (B, 80)
-        batch_attention_mask = torch.stack(batch_attention_mask) # (B, 80)
-        batch_pixel_values = torch.stack(batch_pixel_values) # (B, 256, 1536)
-        batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
+        # Per-sample tokenization means different instructions -> different lengths, so stack()
+        # would fail. Right-pad exactly like training's collator (see _collate_vlm_batch).
+        batch_input_ids, batch_attention_mask = self._collate_vlm_batch(batch_input_ids)
+        # Qwen expects pixel_values / image_grid_thw flattened across ALL images in the
+        # batch (no leading batch dim). With >1 image per sample (ego + goal) `stack`
+        # would make image_grid_thw 3-D -> thw[:, 2] crashes. `cat` keeps them 2-D:
+        #   pixel_values   -> (total_image_patches, 1536)
+        #   image_grid_thw -> (total_images, 3)
+        batch_pixel_values = torch.cat(batch_pixel_values, dim=0)
+        batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
 
         with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
             # extract vision + language features
@@ -1726,12 +1894,16 @@ class Psi0Model(nn.Module):
                 model_pred = self.action_header(
                     hidden_states=None,
                     timestep=batched_timestep,
+                    pooled_projections=pooled_projections,  # (B, D) for combined_temb
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
-                        views=vlm_hidden_states,  # (B,V,N,D)
+                        views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
                     ),
+                    # match training: mask the pad positions out of the action header's
+                    # cross-attention, otherwise it reads pad-token hidden states
+                    vlm_attn_mask=batch_attention_mask,  # (B, seq_len)
                     return_dict=True,
                 ).action
                 action_samples = self.noise_scheduler.step(
@@ -1748,16 +1920,22 @@ class Psi0Model(nn.Module):
         instructions: List[str], # (B,)
         num_inference_steps: int,
         traj2ds, 
-        prev_actions: torch.Tensor = None, # (1, H, D)
+        prev_actions: torch.Tensor = None, # (B, H, D) — one previous chunk per sample
         inference_delay: int = 0,
         max_delay: int = 0,
+        goal_images: List[List[Image.Image]] | None = None,  # B * List of PIL goal images
+        pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
         **kwargs: str
     ) -> torch.Tensor:
 
         ## RTC related ##
         H = self.action_horizon
         assert prev_actions is not None and inference_delay > 0 and max_delay > 0, "prev_actions, inference_delay and max_delay must be provided"
-        assert prev_actions.shape[0] == 1
+        # One previous chunk per sample. Deliberately NOT allowing a (1, H, D) broadcast at
+        # bsz > 1: that would silently condition every client in a batch on one client's
+        # previous chunk. Single-client callers have states.shape[0] == 1 and are unaffected.
+        assert prev_actions.shape[0] == states.shape[0], (
+            f"prev_actions batch {prev_actions.shape[0]} != states batch {states.shape[0]}")
         prev_actions = prev_actions.to(device=self.device, dtype=torch.float32)
 
         # Create soft mask for inpainting
@@ -1765,23 +1943,34 @@ class Psi0Model(nn.Module):
 
         # Validate constraint from paper: d ≤ s ≤ H - d
         assert d < H, f"Constraint violated: d={d}, H={H}. Need d < H"
-        assert d < max_delay, f"Constraint violated: d={d}, max_delay={max_delay}. Need d < max_delay"
-
-        prefix_mask = torch.arange(H, device=self.device)[None, :] < d # shape (1, H)
-        ##              ##
-
+        # assert d < max_delay, f"Constraint violated: d={d}, max_delay={max_delay}. Need d < max_delay"
+        d_limit = min(H, max_delay)
+        if d >= d_limit:
+            overwatch.warning(
+                f"RTC inference_delay d={d} >= limit {d_limit}=min(H={H}, max_delay={max_delay}); "
+                f"clamping to {d_limit - 1} — inference is slower than the delay budget"
+            )
+            d = d_limit - 1
 
         bsz = states.shape[0]
+        # (B, H): d is shared by all samples, but expand explicitly — `batched_timestep_masked`
+        # below is derived from this mask and must carry the batch dim, not rely on broadcasting.
+        prefix_mask = (torch.arange(H, device=self.device)[None, :] < d).expand(bsz, -1)
+
         batch_input_ids = []
         batch_attention_mask = []
         batch_pixel_values = []
         batch_image_grid_thw = []
 
 
-        for observation, instruction in zip(observations, instructions):
+        for b, (observation, instruction) in enumerate(zip(observations, instructions)):
             messages = []
             content = [{"type": "image", "image": img} for img in observation]
             content.append({"type": "text", "text": instruction})
+            # Match training (PsixModelTransform.build_qwenvl_inputs): goal image(s)
+            # are appended AFTER the instruction text.
+            if goal_images is not None and goal_images[b] is not None:
+                content.extend({"type": "image", "image": img} for img in goal_images[b])
             user_msg = {"role": "user", "content": content}
             messages.append([user_msg])
             texts = [
@@ -1805,12 +1994,18 @@ class Psi0Model(nn.Module):
             batch_input_ids.append(inputs['input_ids'].squeeze(0))
             batch_attention_mask.append(inputs['attention_mask'].squeeze(0))
             batch_pixel_values.append(inputs['pixel_values'])
-            batch_image_grid_thw.append(inputs['image_grid_thw'].squeeze(0))
+            batch_image_grid_thw.append(inputs['image_grid_thw'])
 
-        batch_input_ids = torch.stack(batch_input_ids) # (B, 80)
-        batch_attention_mask = torch.stack(batch_attention_mask) # (B, 80)
-        batch_pixel_values = torch.stack(batch_pixel_values) # (B, 256, 1536)
-        batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
+        # Per-sample tokenization means different instructions -> different lengths, so stack()
+        # would fail. Right-pad exactly like training's collator (see _collate_vlm_batch).
+        batch_input_ids, batch_attention_mask = self._collate_vlm_batch(batch_input_ids)
+        # Qwen expects pixel_values / image_grid_thw flattened across ALL images in the
+        # batch (no leading batch dim). With >1 image per sample (ego + goal) `stack`
+        # would make image_grid_thw 3-D -> thw[:, 2] crashes. `cat` keeps them 2-D:
+        #   pixel_values   -> (total_image_patches, 1536)
+        #   image_grid_thw -> (total_images, 3)
+        batch_pixel_values = torch.cat(batch_pixel_values, dim=0)
+        batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
 
         with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
             # extract vision + language features
@@ -1849,12 +2044,16 @@ class Psi0Model(nn.Module):
                 model_pred = self.action_header(
                     hidden_states=None,
                     timestep=batched_timestep_masked,
+                    pooled_projections=pooled_projections,  # (B, D) for combined_temb
                     joint_attention_kwargs=dict(
                         action_hidden_embeds=action_samples, # (B,Tp,Da)
-                        views=vlm_hidden_states,  # (B,V,N,D)
+                        views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
                         obs=states,  # (B,1,M)
                         traj2ds=traj2ds,  # (B, C, 3, H, W)
                     ),
+                    # match training: mask the pad positions out of the action header's
+                    # cross-attention, otherwise it reads pad-token hidden states
+                    vlm_attn_mask=batch_attention_mask,  # (B, seq_len)
                     return_dict=True,
                 ).action
 
@@ -1867,6 +2066,7 @@ class Psi0Model(nn.Module):
 
         return action_samples.float()
 
+    @torch.no_grad()
     def predict_action_with_rtc_flow(
         self,
         observations: List[List[Image.Image]],  # B * List of PIL Image as [view1, view2]
@@ -1876,178 +2076,164 @@ class Psi0Model(nn.Module):
         traj2ds, 
         prev_actions: torch.Tensor = None, # (1, H, D)
         inference_delay: int = 0,
-        execution_horizon: int = 0,
+        # s: free steps at the tail. None = derive H-2d. Matches
+        # psix.predict_action_with_test_time_rtc -- and must stay `is not None`
+        # below, so that an explicit s=0 is honoured rather than silently derived.
+        execution_horizon: int | None = None,
+        pooled_projections: Optional[torch.Tensor] = None,  # (B, D) for combined_temb
         mask_schedule: str = "exponential",
-        guidance_weight: float = 5.0,
+        guidance_weight: float = 5.0,  # DEPRECATED, see the guidance scaling note below
+        guidance_alpha: float = 0.9,
         **kwargs: str
     ) -> np.ndarray:
-        with torch.no_grad():
 
-            ## RTC related ##
-            H = self.action_horizon
-            assert prev_actions is not None and inference_delay > 0 and execution_horizon > 0, "prev_actions, inference_delay and execution_horizon must be provided"
-            assert prev_actions.shape[0] == 1
-            prev_actions = prev_actions.to(device=self.device, dtype=torch.float32)
+        ## RTC related ##
+        H = self.action_horizon
+        assert prev_actions is not None, "prev_actions must be provided"
+        assert prev_actions.shape[0] == 1
+        assert tuple(prev_actions.shape) == (1, H, self.action_dim), (
+            f"prev_actions shape {tuple(prev_actions.shape)} != (1,{H},{self.action_dim}); "
+            "the caller must shift/pad the previous chunk to length H")
+        prev_actions = prev_actions.to(device=self.device, dtype=torch.float32)
 
-            # Create soft mask for inpainting
-            d = inference_delay
-            s = execution_horizon
+        # Create soft mask for inpainting
+        d = int(inference_delay)
+        s = int(execution_horizon) if execution_horizon is not None else max(1, H - 2 * d)
 
-            # Validate constraint from paper: d ≤ s ≤ H - d
-            assert d <= s and s <= H - d, f"Constraint violated: d={d}, s={s}, H={H}. Need d ≤ s ≤ H-d"
+        # Paper constraint d ≤ s ≤ H-d. Clamp instead of asserting (matches
+        # psix.predict_action_with_test_time_rtc): a server that hands over a
+        # d/s pair one tick outside the window should degrade to the nearest
+        # valid mask, not kill the request mid-episode. d=0 is legal here -- it
+        # just means nothing is hard-frozen; rows [0, H-s) still carry the ramp,
+        # and only s == H reduces this call to plain predict_action.
+        d = max(0, min(d, H - 1))
+        s = max(d, min(s, H - d))
 
-            # Create soft mask [H] according to Equation 5
-            mask = self._create_soft_mask(
-                H, d, s, schedule=mask_schedule, device=self.device
+        # Create soft mask [H] according to Equation 5
+        mask = self._create_soft_mask(
+            H, d, s, schedule=mask_schedule, device=self.device
+        )
+        mask_expanded = mask.view(1, -1, 1).expand(1, self.action_horizon, self.action_dim)
+
+        bsz = states.shape[0]
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_pixel_values = []
+        batch_image_grid_thw = []
+
+        for observation, instruction in zip(observations, instructions):
+            messages = []
+            content = [{"type": "image", "image": img} for img in observation]
+            content.append({"type": "text", "text": instruction})
+            user_msg = {"role": "user", "content": content}
+            messages.append([user_msg])
+            texts = [
+                self.vlm_processor.apply_chat_template(
+                    m, tokenize=False, add_generation_prompt=True
+                )
+                for m in messages
+            ]
+            image_inputs, video_inputs = process_vision_info(messages, image_patch_size=16)
+            inputs = self.vlm_processor(
+                text=texts,
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            ).to(self.device)
+            batch_input_ids.append(inputs['input_ids'].squeeze(0))
+            batch_attention_mask.append(inputs['attention_mask'].squeeze(0))
+            batch_pixel_values.append(inputs['pixel_values'])
+            batch_image_grid_thw.append(inputs['image_grid_thw'])
+
+        # Same collation as predict_action / predict_action_with_training_rtc_flow.
+        # This path used to torch.stack() everything, which gave pixel_values a
+        # leading batch dim (B, patches, 1536) -- a shape Qwen does not accept --
+        # and could not pad ragged prompts at all. Keep the three sampling paths
+        # byte-identical up to the guidance term, or a test-time RTC rollout is
+        # not comparable with the open-loop one.
+        batch_input_ids, batch_attention_mask = self._collate_vlm_batch(batch_input_ids)
+        batch_pixel_values = torch.cat(batch_pixel_values, dim=0)
+        batch_image_grid_thw = torch.cat(batch_image_grid_thw, dim=0)
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            # extract vision + language features
+            output = self.vlm_model(
+                input_ids=batch_input_ids,
+                attention_mask=batch_attention_mask,
+                pixel_values=batch_pixel_values,
+                image_grid_thw=batch_image_grid_thw,
+                output_hidden_states=True,
+                return_dict=True
             )
-            mask_expanded = mask.view(1, -1, 1).expand(1, self.action_horizon, self.action_dim)
-            ##              ##
+            vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
 
+            # use hidden states from the last layer
+            vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
+            vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
 
-            bsz = states.shape[0]
-            batch_input_ids = []
-            batch_attention_mask = []
-            batch_pixel_values = []
-            batch_image_grid_thw = []
+            # generate action from noise
+            action_samples = torch.randn(
+                bsz, self.action_horizon, self.action_dim, device=self.device
+            )
+            # target_noise = action_samples.clone().detach()
+            self.noise_scheduler.set_timesteps(num_inference_steps)
 
+            for timestep in self.noise_scheduler.timesteps:
+                batched_timestep = timestep.expand(bsz).to(self.device).detach()
 
-            for observation, instruction in zip(observations, instructions):
-                messages = []
-                content = [{"type": "image", "image": img} for img in observation]
-                content.append({"type": "text", "text": instruction})
-                user_msg = {"role": "user", "content": content}
-                messages.append([user_msg])
-                texts = [
-                    self.vlm_processor.apply_chat_template(
-                        m, tokenize=False, add_generation_prompt=True
-                    )
-                    for m in messages
-                ]
-                image_inputs, video_inputs = process_vision_info(messages, image_patch_size=16)
-                inputs = self.vlm_processor(
-                    text=texts,
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt",
-                ).to(self.device)
-                # input_ids torch.Size([1, 80])
-                # attention_mask torch.Size([1, 80])
-                # pixel_values torch.Size([256, 1536])
-                # image_grid_thw torch.Size([1, 3])
-                batch_input_ids.append(inputs['input_ids'].squeeze(0))
-                batch_attention_mask.append(inputs['attention_mask'].squeeze(0))
-                batch_pixel_values.append(inputs['pixel_values'])
-                batch_image_grid_thw.append(inputs['image_grid_thw'].squeeze(0))
+                with torch.enable_grad():
+                    # Detach and enable gradient only for sample_actions in this step
+                    action_samples_grad = action_samples.detach().requires_grad_(True)
 
-            batch_input_ids = torch.stack(batch_input_ids) # (B, 80)
-            batch_attention_mask = torch.stack(batch_attention_mask) # (B, 80)
-            batch_pixel_values = torch.stack(batch_pixel_values) # (B, 256, 1536)
-            batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
+                    model_pred = self.action_header(
+                        hidden_states=None,
+                        timestep=batched_timestep,
+                        pooled_projections=pooled_projections,  # (B, D) for combined_temb
+                        joint_attention_kwargs=dict(
+                            action_hidden_embeds=action_samples_grad, # (B,Tp,Da)
+                            views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
+                            obs=states,  # (B,1,M)
+                            traj2ds=traj2ds,  # (B, C, 3, H, W)
+                        ),
+                        # match training: mask the pad positions out of the action
+                        # header's cross-attention, otherwise it reads pad-token
+                        # hidden states
+                        vlm_attn_mask=batch_attention_mask,  # (B, seq_len)
+                        return_dict=True,
+                    ).action
 
-            with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
-                # extract vision + language features
-                output = self.vlm_model(
-                    input_ids=batch_input_ids,
-                    attention_mask=batch_attention_mask,
-                    pixel_values=batch_pixel_values,
-                    image_grid_thw=batch_image_grid_thw,
-                    output_hidden_states=True,
-                    return_dict=True
-                )
-                vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-                
+                    # 1. 外推干净data X_0
+                    tau = self.noise_scheduler.sigmas[self.noise_scheduler.index_for_timestep(timestep)].detach()
+                    pred_x0 = action_samples_grad - tau * model_pred
+                    # 2. 计算(Y - pred_X_0) * weights
+                    error = (prev_actions - pred_x0.detach()) * mask_expanded
+                    # 3. vjp
+                    pinv_correction = torch.autograd.grad(
+                        outputs=pred_x0,  # [1,T,D]
+                        inputs=action_samples_grad,        # [1,T,D]
+                        grad_outputs=error,         # 匹配形状 [1,T,D]
+                        retain_graph=False,
+                        create_graph=False
+                    )[0]  # 输出 [1,T,D]
+                    # print("pinv_correction:", pinv_correction)
 
-                # use hidden states from the last layer
-                vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-                vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
+                # 4. 缩放修正项，修正v
+                pinv_norm = pinv_correction.norm()
+                if tau.item() >= 1.0 or pinv_norm < 1e-8:
+                    # tau == 1: the sample is still pure noise, there is nothing to guide yet
+                    correction = torch.zeros_like(pinv_correction)
+                else:
+                    scale = guidance_alpha * error.norm() / (tau * pinv_norm)
+                    correction = scale * pinv_correction
 
-                # generate action from noise
-                action_samples = torch.randn(
-                    bsz, self.action_horizon, self.action_dim, device=self.device
-                )
-                # target_noise = action_samples.clone().detach()
-                self.noise_scheduler.set_timesteps(num_inference_steps)
+                model_pred = model_pred.detach() - correction
 
-                # self.noise_scheduler.timesteps: tensor([1000.,  889.,  778.,  667.,  556.,  445.,  334.,  223.,  112.,    1.])
-                # self.noise_scheduler.sigmas: tensor([1.0000, 0.8890, 0.7780, 0.6670, 0.5560, 0.4450, 0.3340, 0.2230, 0.1120, 0.0010, 0.0000])
+                action_samples = self.noise_scheduler.step(
+                    model_output=model_pred, timestep=timestep, sample=action_samples # type: ignore
+                ).prev_sample
 
-                # self.noise_scheduler.timesteps: tensor([1000.,  889.,  778.,  667.,  556.,  445.,  334.,  223.,  112.,    1.])
-                # self.noise_scheduler.sigmas: tensor([1.0000, 0.8890, 0.7780, 0.6670, 0.5560, 0.4450, 0.3340, 0.2230, 0.1120, 0.0010, 0.0000])
-
-                for timestep in self.noise_scheduler.timesteps:
-                    batched_timestep = timestep.expand(bsz).to(self.device).detach()
-
-                    ### pseudo inverse (with gradient):
-                    # Enable gradient only for this step
-                    with torch.enable_grad():
-                        # Detach and enable gradient only for sample_actions in this step
-                        action_samples_grad = action_samples.detach().requires_grad_(True)
-
-                        model_pred = self.action_header(
-                            hidden_states=None,
-                            timestep=batched_timestep,
-                            joint_attention_kwargs=dict(
-                                action_hidden_embeds=action_samples_grad, # (B,Tp,Da)
-                                views=vlm_hidden_states,  # (B,V,N,D)
-                                obs=states,  # (B,1,M)
-                                traj2ds=traj2ds,  # (B, C, 3, H, W)
-                            ),
-                            return_dict=True,
-                        ).action
-
-                        # 1. 外推干净data X_0
-                        tau = self.noise_scheduler.sigmas[self.noise_scheduler.index_for_timestep(timestep)].detach()
-
-                        # DEBUG test inpainting
-                        # noisy_prev_actions = (1 - tau) * prev_actions + tau * target_noise
-                        # action_samples[:, :d, 14:28] = noisy_prev_actions[:, :d, 14:28]
-
-                        # print("tau:", tau.item())
-                        # print("timestep:", timestep)
-                        # print("self.scheduler.sigmas:", self.scheduler.sigmas)
-                        # print("self.scheduler.index_for_timestep(timestep):", self.scheduler.index_for_timestep(timestep))
-                        pred_x0 = action_samples_grad - tau * model_pred
-                        # pred_x0 = epsilon - model_pred
-                        # print("pred_x0:", pred_x0)
-                        
-
-                        # 2. 计算(Y - pred_X_0) * weights
-                        error = (prev_actions - pred_x0.detach()) * mask_expanded
-                        # print("error:", error)
-                        # print("error.abs().mean():", error.abs().mean())
-
-                        # 3. vjp
-                        pinv_correction = torch.autograd.grad(
-                            outputs=pred_x0,  # [1,T,D]
-                            inputs=action_samples_grad,        # [1,T,D]
-                            grad_outputs=error,         # 匹配形状 [1,T,D]
-                            retain_graph=False,
-                            create_graph=False
-                        )[0]  # 输出 [1,T,D]
-                        # print("pinv_correction:", pinv_correction)
-
-                    # 4. 计算tau相关参数，得到修正项，修正v
-                    inv_r2 = (tau**2 + (1 - tau) ** 2) / (tau**2)
-                    c = torch.nan_to_num(tau / (1 - tau), posinf=guidance_weight)
-                    g = torch.clamp(c * inv_r2, max=guidance_weight)
-                    # print("c * inv_r2:", c * inv_r2)
-                    # print("model_pred_before_correction:", model_pred)
-
-                    model_pred = model_pred - g * pinv_correction
-                    # print("pinv_correction.abs().mean():", pinv_correction.abs().mean())
-                    ###
-
-                    action_samples = self.noise_scheduler.step(
-                        model_output=model_pred, timestep=timestep, sample=action_samples # type: ignore
-                    ).prev_sample
-
-                    # DEBUG test inpainting
-                    # if i == len(self.noise_scheduler.timesteps) - 1:
-                    #     action_samples[:, :d, 14:28] = prev_actions[:, :d, 14:28]
-
-            return action_samples
-
+        return action_samples.float()
 
     def predict_action_with_rtc_flow_naive_inpaint(
         self,
@@ -2172,7 +2358,7 @@ class Psi0Model(nn.Module):
                         timestep=batched_timestep,
                         joint_attention_kwargs=dict(
                             action_hidden_embeds=action_samples, # (B,Tp,Da)
-                            views=vlm_hidden_states,  # (B,V,N,D)
+                            views=self._select_vlm_views(vlm_hidden_states_),  # (B,V,N,D)
                             obs=states,  # (B,1,M)
                             traj2ds=traj2ds,  # (B, C, 3, H, W)
                         ),
@@ -2191,188 +2377,6 @@ class Psi0Model(nn.Module):
                         action_samples[:, :d, :] = prev_actions[:, :d, :]
 
             return action_samples
-
-
-
-    def predict_action_with_rtc_flow_based_gradient(
-        self,
-        observations: List[List[Image.Image]],  # B * List of PIL Image as [view1, view2]
-        states: torch.Tensor, # (B, Ts, Ds)
-        instructions: List[str], # (B,)
-        num_inference_steps: int,
-        traj2ds, 
-        prev_actions: torch.Tensor | None = None, # (1, H, D)
-        inference_delay: int = 0,
-        execution_horizon: int = 0,
-        mask_schedule: str = "exponential",
-        guidance_weight: float = 5.0,
-        **kwargs: str
-    ) -> np.ndarray:
-        with torch.no_grad():
-
-            ## RTC related ##
-            H = self.action_horizon
-            assert prev_actions is not None and inference_delay > 0 and execution_horizon > 0, "prev_actions, inference_delay and execution_horizon must be provided"
-            assert prev_actions.shape[0] == 1
-            prev_actions = prev_actions.to(device=self.device, dtype=torch.float32)
-
-            # Create soft mask for inpainting
-            d = inference_delay
-            s = execution_horizon
-
-            # Validate constraint from paper: d ≤ s ≤ H - d
-            assert d <= s and s <= H - d, f"Constraint violated: d={d}, s={s}, H={H}. Need d ≤ s ≤ H-d"
-
-            # Create soft mask [H] according to Equation 5
-            mask = self._create_soft_mask(
-                H, d, s, schedule=mask_schedule, device=self.device
-            )
-            mask_expanded = mask.view(1, -1, 1).expand(1, self.action_horizon, self.action_dim)
-            ##              ##
-
-
-            bsz = states.shape[0]
-            batch_input_ids = []
-            batch_attention_mask = []
-            batch_pixel_values = []
-            batch_image_grid_thw = []
-
-
-            for observation, instruction in zip(observations, instructions):
-                messages = []
-                content = [{"type": "image", "image": img} for img in observation]
-                content.append({"type": "text", "text": instruction})
-                user_msg = {"role": "user", "content": content}
-                messages.append([user_msg])
-                texts = [
-                    self.vlm_processor.apply_chat_template(
-                        m, tokenize=False, add_generation_prompt=True
-                    )
-                    for m in messages
-                ]
-                image_inputs, video_inputs = process_vision_info(messages, image_patch_size=16)
-                inputs = self.vlm_processor(
-                    text=texts,
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt",
-                ).to(self.device)
-                # input_ids torch.Size([1, 80])
-                # attention_mask torch.Size([1, 80])
-                # pixel_values torch.Size([256, 1536])
-                # image_grid_thw torch.Size([1, 3])
-                batch_input_ids.append(inputs['input_ids'].squeeze(0))
-                batch_attention_mask.append(inputs['attention_mask'].squeeze(0))
-                batch_pixel_values.append(inputs['pixel_values'])
-                batch_image_grid_thw.append(inputs['image_grid_thw'].squeeze(0))
-
-            batch_input_ids = torch.stack(batch_input_ids) # (B, 80)
-            batch_attention_mask = torch.stack(batch_attention_mask) # (B, 80)
-            batch_pixel_values = torch.stack(batch_pixel_values) # (B, 256, 1536)
-            batch_image_grid_thw = torch.stack(batch_image_grid_thw) # (B, 3)
-
-            with torch.autocast(str(self.device).split(":")[0], dtype=torch.bfloat16):
-                # extract vision + language features
-                output = self.vlm_model(
-                    input_ids=batch_input_ids,
-                    attention_mask=batch_attention_mask,
-                    pixel_values=batch_pixel_values,
-                    image_grid_thw=batch_image_grid_thw,
-                    output_hidden_states=True,
-                    return_dict=True
-                )
-                vlm_hidden_states_ = output.hidden_states # len(vlm_hidden_states_) == 29
-                
-
-                # use hidden states from the last layer
-                vlm_hidden_states = vlm_hidden_states_[-1] # shape (B, seq_len, D_h)  shape(16, 80, 2048)
-                vlm_hidden_states = vlm_hidden_states.unsqueeze(1) # shape (B, 1, seq_len, D_h) (16, 1, 80, 2048)
-
-                # 初始化 action_samples
-                action_samples = torch.randn(
-                    bsz, self.action_horizon, self.action_dim, device=self.device
-                )
-                
-                # 使用同样的 noise 构建目标，保证一致性
-                target_noise = action_samples.clone()
-                
-                self.noise_scheduler.set_timesteps(num_inference_steps)
-
-                for i, timestep in enumerate(self.noise_scheduler.timesteps):
-                    # 1. 计算当前步的目标 (Noisy Target)
-                    # ---------------------------------------------------------
-                    tau = self.noise_scheduler.sigmas[self.noise_scheduler.index_for_timestep(timestep)]
-                    
-                    # 这是一个移动的目标：随着 tau 变小，它越来越接近真实的 prev_actions
-                    noisy_prev_actions = (1 - tau) * prev_actions + tau * target_noise
-                    
-                    # 2. 基于梯度的 Guidance (核心部分)
-                    # ---------------------------------------------------------
-                    # 我们希望 action_samples 在 mask 区域尽可能接近 noisy_prev_actions
-                    # 通过梯度下降来修改 action_samples
-                    
-                    # 定义 Guidance 的强度衰减：
-                    # 早期(噪声大)需要强引导来定型，晚期(噪声小)减弱引导以允许模型平滑过渡
-                    current_scale = guidance_weight * (tau ** 0.5) # 这里的衰减策略可以调整，例如用 linear
-
-                    # 临时开启梯度计算
-                    with torch.enable_grad():
-                        # Detach 并开启梯度，创建一个新的叶子节点
-                        x_in = action_samples.detach().requires_grad_(True)
-                        
-                        # 计算 Loss: 只在 mask 有值的地方计算 MSE
-                        # 这里的 mask_expanded 充当了权重的角色
-                        # 重点：只计算前 s 步的差异 (inference_delay + execution_horizon)
-                        diff = (x_in - noisy_prev_actions)
-                        
-                        # 使用 mask 加权平方误差
-                        # 形状: (B, H, D) * (1, H, D)
-                        loss = (diff ** 2 * mask_expanded).sum() 
-                        
-                        # 计算梯度
-                        grad = torch.autograd.grad(loss, x_in)[0]
-
-                    # 更新 action_samples (朝着 loss 减小的方向)
-                    # 注意：这里我们是在 Latent 空间进行微调
-                    print("grad[:, :, 0:3].abs().mean():", grad[:, :, 0:3].abs().mean())
-                    print("grad[:, :, 15:17].abs().mean():", grad[:, :, 15:17].abs().mean())
-                    
-
-                    action_samples = action_samples - current_scale * grad
-
-                    # 3. 常规的 Flow Matching / Diffusion Step
-                    # ---------------------------------------------------------
-                    batched_timestep = timestep.expand(bsz).to(self.device).detach()
-                    
-                    model_pred = self.action_header(
-                        hidden_states=None,
-                        timestep=batched_timestep,
-                        joint_attention_kwargs=dict(
-                            action_hidden_embeds=action_samples, 
-                            views=vlm_hidden_states,
-                            obs=states,
-                            traj2ds=traj2ds,
-                        ),
-                        return_dict=True,
-                    ).action
-
-                    # 4. Denoise one step
-                    action_samples = self.noise_scheduler.step(
-                        model_output=model_pred, timestep=timestep, sample=action_samples
-                    ).prev_sample
-
-                    # 5. (可选) Soft Blending 作为最后的保险
-                    # 如果单纯靠梯度还是压不住，可以在最后一步稍微融合一下
-                    # 但如果 guidance_weight 足够，通常不需要这步
-                    # if i == len(self.noise_scheduler.timesteps) - 1:
-                    #         # 最后一步不再有噪声，直接做一次软混合确保开头完全吻合
-                    #         action_samples = prev_actions * mask_expanded + action_samples * (1 - mask_expanded)
-
-            return action_samples
-
-
-
 
     def _create_soft_mask(self, H, d, s, schedule="exponential", device="cpu"):
         """

@@ -37,10 +37,11 @@ At the top, the $\Psi_0$ model consists of two end-to-end trained components: a 
 
 ## 📢 News & Updates
 
+* [2026-08-30] Released SIMPLE SONIC wholebody training recipe.
+* [2026-08-30] Released [docker support](#docker-support).
 * [2026-07-14] Released DreamZero baseline for SIMPLE.
 * [2026-06-13] Released SONIC integration for Psi-0.
 * [2026-06-03] 🎉🎉🎉 Psi-0 won the Best Paper Award at the 2nd 3D-LLM/VLA Workshop at CVPR 2026.
-
 
 
 ## Table of Contents
@@ -90,43 +91,54 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Set up the $\Psi_0$ environment:
 
-> ℹ️ We manage the $\Psi_0$ environment and all the baselines through `uv` and they all share the same `src/` code.  See [Environment Management](baselines/README.md) for more details.
-
-```
-uv venv .venv-psi --python 3.10
-source .venv-psi/bin/activate
-GIT_LFS_SKIP_SMUDGE=1 uv sync \
-  --group serve \
-  --group viz \
-  --group psi \
-  --index-strategy unsafe-best-match \
-  --active
-uv pip install flash_attn==2.7.4.post1 --no-build-isolation
-```
-
-> If you want to support `SIMPLE` evaluation, you can use the following commands to install `SIMPLE` along with `Psi0`. See also [quickstart](examples/quick_start/psi.md).
-
-```
-git submodule update --init --recursive
-GIT_LFS_SKIP_SMUDGE=1 uv sync --all-groups --index-strategy unsafe-best-match --active
-uv pip install flash_attn==2.7.4.post1 --no-build-isolation
-UV_PROJECT_ENVIRONMENT=${pwd}/.venv-psi ./scripts/install_curobo.sh
-```
-
 Test installation, a version number should be displayed.
 ```bash
 python -c "import psi;print(psi.__version__);"
-```
-
-Verify `SIMPLE` installation
-``` bash
-python -c "import simple; print(simple.__version__)"
 ```
 
 Verify the shared `lerobot` stack is importable.
 ```bash
 python -c "from psi.data.lerobot.compat import LEROBOT_LAYOUT; print(LEROBOT_LAYOUT)"
 ```
+
+#### Docker Support
+
+Pull the prebuilt image from the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/physical-superintelligence-lab/psi0:latest
+docker tag ghcr.io/physical-superintelligence-lab/psi0:latest psi:train
+```
+
+The retag is what lets `docker-compose.yml` find it — it refers to the image as
+`psi:${PSI_TAG:-train}`, and `PSI_TAG` overrides only the tag, not the registry
+path. Use a dated tag such as `:260830` to pin an exact build.
+
+The image holds **dependencies only** — python 3.11, torch 2.7 cu12 and
+flash-attn in `/workspace/.venv-psi`, on a plain CUDA base. Your checkout stays
+outside it and is bind-mounted, so `psi` is installed editable and source edits
+take effect on a container restart rather than a rebuild.
+
+Serve a checkpoint with it:
+
+```bash
+docker compose up serve-psi0-sonic-http
+```
+
+Every argument is overridable from the shell or `.env` (`PORT`, `RUN`,
+`CKPT_STEP`, `ACTION_EXEC_HORIZON`, `RTC_FLAG`, `GPUS`, ...), and
+`docker compose run --rm serve-psi0-sonic-http --help` lists the server's own
+options.
+
+If you want to build it locally:
+
+```bash
+docker compose build psi     # or: docker build -f scripts/train/Dockerfile -t psi:train .
+```
+
+See [scripts/train/README.md](scripts/train/README.md) for the enroot/cluster
+recipe and for how dependencies are pinned.
+
 
 ### Data Collection
 > 📂 We open-sourced all the 9 real-world tasks. You can directly download the data and jump to the [Fine-Tuning](#training-real).
@@ -558,7 +570,7 @@ The policy rollout videos will be found in folder `third_party/SIMPLE/data/evals
 
 Download and cache the official `Qwen/Qwen3-VL-2B-Instruct` weights.
 ```
-scripts/predownload_qwen3vl.py
+python scripts/predownload_qwen3vl.py
 ```
 
 Pre-train on the [EgoDex dataset](https://github.com/apple/ml-egodex)
@@ -640,10 +652,12 @@ Download the selected models
 > Edit `.env` to use `HF_ENDPOINT=https://hf-mirror.com` if needed.
 
 ```
+export CKPT_DIR=<Remote Directory>
+
 python scripts/data/download.py \
   --repo-id=USC-PSI-Lab/psi-model \
-  --remote-dir=<Remote Directory> \
-  --local-dir=$PSI_HOME/cache/checkpoints/<Remote Directory> \
+  --remote-dir=$CKPT_DIR \
+  --local-dir=$PSI_HOME/cache/checkpoints/$CKPT_DIR \
   --repo-type=model
 ```
 
@@ -686,6 +700,7 @@ uv pip install wandb==0.18.0
 
 update `torch` and `flash-attn`
 ```
+uv pip uninstall torch torchvision
 uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install flash-attn --no-build-isolation
 ```

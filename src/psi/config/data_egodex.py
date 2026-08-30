@@ -1,7 +1,10 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, Dict, List, TYPE_CHECKING
 from psi.config.config import DataConfig
-
+if TYPE_CHECKING:
+    from psi.data.dataset import TransformableDataset
+    
 class EgoDexDataConfig(DataConfig):
     root_dir: str
     upsample_rate: int = 3
@@ -12,7 +15,7 @@ class EgoDexDataConfig(DataConfig):
     use_delta_actions: bool = True
     load_retarget: bool = False
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> TransformableDataset:
         from psi.data.egodex.egodex_dataset import EgoDexDataset
         from psi.data.dataset import Dataset as MapStyleDataset
         # from psi.data.dataset import IterableDataset

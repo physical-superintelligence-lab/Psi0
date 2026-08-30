@@ -196,6 +196,14 @@ def resolve_path(path: Union[str, Path], subdir="data", auto_download=False) -> 
                 if match:
                     robot_name = match.group(1)
                     return f"assets/robots/{robot_name}.zip"
+                
+                pattern = r"^data/egodex/([^/]+)/.+$"
+                match = re.match(pattern, rel_path)
+                if match:
+                    data_name = match.group(1)
+                    return f"data/egodex/{data_name}.zip"
+
+                ... # add more patterns as needed
 
             zip_file = _parse_zip_file_from_rel_path(filename)
             # print(zip_file);
@@ -431,7 +439,7 @@ def pad_to_len(x, target_len, dim=1, pad_value=0.0):
         mask: np.ndarray of bool, True for original data, False for padded region
     """
     current_len = x.shape[dim]
-    if current_len >= target_len:
+    if target_len is None or current_len >= target_len:
         mask = np.ones(x.shape, dtype=bool)
         return x, mask
     pad_width = [(0, 0)] * x.ndim

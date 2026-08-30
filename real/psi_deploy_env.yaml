@@ -170,6 +170,7 @@ dependencies:
       - jedi==0.19.2
       - jinja2==3.1.6
       - joblib==1.5.3
+      - json-numpy==2.1.1
       - kiwisolver==1.4.9
       - loop-rate-limiters==1.2.0
       - lxml==6.0.2
@@ -209,7 +210,6 @@ dependencies:
       - pexpect==4.9.0
       - pickleshare==0.7.5
       - pillow==12.1.1
-      - pin==2.7.0
       - pin-pink==3.4.0
       - platformdirs==4.9.4
       - prompt-toolkit==3.0.52
@@ -267,6 +267,7 @@ dependencies:
       - wandb==0.17.3
       - waterbear==2.6.8
       - wcwidth==0.6.0
+      - websocket-client==1.8.0
       - websockets==16.0
       - yarl==1.23.0
       - zipp==3.23.0

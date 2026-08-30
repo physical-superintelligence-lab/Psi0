@@ -9,7 +9,7 @@ wheels/
 # Virtual environments
 .venv*
 
-/data/
+#/data/
 cache
 *.mp4
 ml-egodex_dataset/ # soft link to the egodex dataset
@@ -47,7 +47,7 @@ src/fast/pi
 .deepspeed_env
 *.bak
 #uv.lock
-.vscode/
+#.vscode/
 .direnv/
 third_party/
 src/gr00t/.venv/
@@ -55,8 +55,6 @@ props/
 textures/
 test.py
 *.npy
-
 unitree_sdk2_python
-
 src/h_rdt/datasets/pretrain/egodex_large_values.txt
-.claude/
+.egoverse

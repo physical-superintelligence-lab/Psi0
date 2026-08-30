@@ -1391,7 +1391,40 @@ _CONFIGS = [
         policy_metadata={"dataset": "G1WholebodyTabletopGraspMP-v0"},
         checkpoint_base_dir=f".runs/openpi-05"
     ),
-    
+    #
+    # Mixture of the 33 SIMPLE tasks (single merged LeRobot dataset, 3079 episodes / 1.33M frames).
+    # Per-task prompts come from the dataset `task` field, so `prompt_from_task=True` is what
+    # separates the 33 tasks at train time.
+    #
+    TrainConfig(
+        name="Simple-mix-33",
+        project_name="psi",
+        num_workers=8,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=36,
+            action_horizon=30,
+            max_token_len=250,
+        ),
+        data=LeRobotHFMDataConfig(
+            repo_id=f"{os.environ['PSI_HOME']}/data/simple-33-v20",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
+        # ~10 epochs over the mix at batch_size 128 (single-task configs run 40k steps on ~20k frames).
+        num_train_steps=100_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=1e-4,
+            decay_steps=100_000,
+            decay_lr=1e-8,
+        ),
+        pytorch_weight_path=f"{os.environ['PSI_HOME']}/cache/checkpoints/openpi/pi05_droid",
+        policy_metadata={"dataset": "simple-33-v20"},
+        checkpoint_base_dir=f".runs/openpi-05"
+    ),
+
     #
     # ALOHA Sim configs. This config is used to demonstrate how to train on a simple simulated environment.
     #

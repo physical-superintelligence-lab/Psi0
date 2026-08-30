@@ -56,6 +56,18 @@ class CenterCrop(BaseModel):
         return v2.CenterCrop(self.size)
 
 
+class RandomCrop(BaseModel):
+    size: int | tuple[int, int] = (224, 224)  # H,W
+    pad_if_needed: bool = True  # pad when the input is smaller than the crop
+
+    def __call__(self):
+        try:
+            from torchvision.transforms import v2
+        except:
+            from torchvision import transforms as v2
+        return v2.RandomCrop(self.size, pad_if_needed=self.pad_if_needed)
+
+
 class Normalize(BaseModel):
     mean: float | List[float] = Field(default_factory=lambda: [0.485, 0.456, 0.406])
     std: float | List[float] = Field(default_factory=lambda: [0.229, 0.224, 0.225])

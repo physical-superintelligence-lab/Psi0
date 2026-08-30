@@ -11,7 +11,17 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import IterableDataset as TorchIterableDataset
 
-class Dataset(torch.utils.data.Dataset):
+
+class TransformableDataset(TorchDataset):
+    """Marker base class for all PSI datasets.
+
+    All PSI datasets must apply transforms internally so that data is
+    fully transformed on access. Downstream APIs should type-hint against
+    this class instead of individual dataset types.
+    """
+
+
+class Dataset(TransformableDataset, TorchDataset):
     def __init__(self, dataCfg: DataConfig, dataset: TorchDataset|Any, **kwargs) -> None:
         self.raw_dataset = dataset
         self.transform = dataCfg.transform
@@ -33,7 +43,7 @@ class Dataset(torch.utils.data.Dataset):
     def dataset_statistics(self) -> Dict[str, Any]:
         return getattr(self.raw_dataset, "dataset_statistics", {})
 
-class IterableDataset(torch.utils.data.IterableDataset):
+class IterableDataset(TransformableDataset, TorchIterableDataset):
 
     def __init__(
         self, dataCfg: DataConfig, dataset: TorchIterableDataset|Any, **kwargs
@@ -59,7 +69,7 @@ class IterableDataset(torch.utils.data.IterableDataset):
         return getattr(self.raw_dataset, "dataset_statistics", {})
 
 
-class MixtureDataset(TorchDataset):
+class MixtureDataset(TransformableDataset, TorchDataset):
 
     specs: list[DatasetSpec]
     

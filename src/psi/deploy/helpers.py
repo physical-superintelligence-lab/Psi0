@@ -10,6 +10,9 @@ from typing import Union, Dict, Any, List
 from pathlib import Path
 
 def numpy_serialize(o):
+    # an already-serialized blob passes through unchanged
+    if isinstance(o, dict) and "__numpy__" in o:
+        return o
     if isinstance(o, (np.ndarray, np.generic)):
         data = o.data if o.flags["C_CONTIGUOUS"] else o.tobytes()
         return {

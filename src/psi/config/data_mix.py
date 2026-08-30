@@ -1,6 +1,9 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, Optional, Dict, List, TYPE_CHECKING
 from psi.config.config import DataConfig
+if TYPE_CHECKING:
+    from psi.data.dataset import TransformableDataset
 
 class MixedDataConfig(DataConfig):
     use_delta_actions: bool = True
@@ -23,7 +26,7 @@ class MixedDataConfig(DataConfig):
     sampler: str = "batch_mixture"  # or "token_mixture"
     tokens_per_device: int = 2048 # for token_mixture sampler
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> TransformableDataset:
         from psi.data.egodex.egodex_dataset import EgoDexDataset
         from psi.data.humanoid.he_raw_dataset import HERawDataset
         from psi.data.dataset import MixtureDataset

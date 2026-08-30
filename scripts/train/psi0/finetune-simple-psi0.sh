@@ -1,11 +1,41 @@
 #!/bin/bash
 
-export OMP_NUM_THREADS=32
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+TORCHRUN_PID=
+PYTHON_BIN=
+CLEANUP_RUNNING=0
 
-source .venv-psi/bin/activate
+cleanup() {
+    if [ "$CLEANUP_RUNNING" -eq 1 ]; then return; fi
+    CLEANUP_RUNNING=1
+    echo "Interrupted - stopping torchrun and worker processes..."
+    trap - INT TERM
+    if [ -n "$TORCHRUN_PID" ] && kill -0 "$TORCHRUN_PID" 2>/dev/null; then
+        kill -TERM "$TORCHRUN_PID" 2>/dev/null || true
+    fi
+    if [ -n "$PYTHON_BIN" ]; then
+        pkill -TERM -f "$PYTHON_BIN" 2>/dev/null || true
+    fi
+    if [ -n "$TORCHRUN_PID" ]; then
+        wait "$TORCHRUN_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TORCHRUN_PID" ] && kill -0 "$TORCHRUN_PID" 2>/dev/null; then
+        kill -KILL "$TORCHRUN_PID" 2>/dev/null || true
+    fi
+    if [ -n "$PYTHON_BIN" ]; then
+        pkill -KILL -f "$PYTHON_BIN" 2>/dev/null || true
+    fi
+}
+trap cleanup INT TERM
 
-NPROC_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
+# When run directly on the host (not via sbatch), resolve to project root.
+if [[ -z "$SLURM_JOB_ID" ]]; then
+    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+fi
+
+source "${PSI_VENV:-$([ -d /workspace/.venv-psi ] && echo /workspace/.venv-psi || echo .venv-psi)}/bin/activate"
+PYTHON_BIN=$(readlink -f "$(command -v python3)")
+
+NPROC_PER_NODE=$(echo "${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" | tr ',' '\n' | wc -l)
 ulimit -n 65535
 echo "Training with $NPROC_PER_NODE GPUs"
 
@@ -22,6 +52,11 @@ export exp=${2:-$default_exp}
 
 echo "Task: $task"
 echo "Experiment name: $exp"
+
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MASTER_PORT=${MASTER_PORT:-29500}
 
 args="
 finetune_simple_psi0_config \
@@ -45,7 +80,7 @@ finetune_simple_psi0_config \
 --train.lr_scheduler_kwargs.weight_decay=1e-6 \
 --train.lr_scheduler_kwargs.betas 0.95 0.999 \
 --log.report_to=wandb \
---data.root_dir=/hfm/data/simple \
+--data.root_dir=data/simple \
 --data.train-repo-ids=$task \
 --data.transform.repack.pad-action-dim=36 \
 --data.transform.repack.pad-state-dim=36 \
@@ -60,8 +95,8 @@ finetune_simple_psi0_config \
 --data.transform.model.img-aug \
 --data.transform.model.resize.size 180 320 \
 --data.transform.model.center_crop.size 180 320 \
---model.model_name_or_path=/hfm/cache/checkpoints/psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k \
---model.pretrained-action-header-path=/hfm/cache/checkpoints/psi0/postpre.1by1.pad36.2601131206.ckpt.he30k \
+--model.model_name_or_path=cache/checkpoints/psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k \
+--model.pretrained-action-header-path=cache/checkpoints/psi0/postpre.1by1.pad36.2601131206.ckpt.he30k \
 --model.noise-scheduler=flow \
 --model.train-diffusion-steps=1000 \
 --model.n_conditions=0 \
@@ -78,6 +113,26 @@ finetune_simple_psi0_config \
 --model.max-delay=8
 "
 
-torchrun --nproc_per_node=$NPROC_PER_NODE --master_port=29500 scripts/train.py \
-    ${args}
+cat <<EOF
+Running:
+torchrun \\
+  --nnodes=$NNODES \\
+  --nproc_per_node=$NPROC_PER_NODE \\
+  --node_rank=$NODE_RANK \\
+  --master_addr=$MASTER_ADDR \\
+  --master_port=$MASTER_PORT \\
+  scripts/train.py \\
+  ${args}
+EOF
 
+torchrun \
+    --nnodes=$NNODES \
+    --nproc_per_node=$NPROC_PER_NODE \
+    --node_rank=$NODE_RANK \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    scripts/train.py \
+    ${args} &
+
+TORCHRUN_PID=$!
+wait "$TORCHRUN_PID"

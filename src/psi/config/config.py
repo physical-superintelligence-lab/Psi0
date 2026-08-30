@@ -5,9 +5,14 @@ from pydantic import BaseModel, Field, model_validator
 import os
 import tyro
 from typing import Union, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from psi.data.dataset import TransformableDataset
+    
 from tyro.conf import subcommand as cmd
 from pathlib import Path
 import datetime
+
 from psi.config.transform import DataTransform
 
 class LoggingConfig(BaseModel):
@@ -33,6 +38,7 @@ class TrainConfig(BaseModel):
     num_workers: int = 8
     overfit_single_batch: bool = False
     name: str = "human3d"  # "vqvae"
+    run_tag: str | None = None  # if set, replaces the shorten(dataset_name) segment of the run folder name
     resume_from_checkpoint: str | None = None
     skip_resumed_steps: bool = False
 
@@ -53,6 +59,9 @@ class TrainConfig(BaseModel):
 
     checkpointing_steps: int = 5000
     max_checkpoints_to_keep: int | None = None
+    # Checkpoints on this step cadence are exempt from max_checkpoints_to_keep.
+    # Set to None to enforce a strict rolling window (useful for large models).
+    preserve_checkpoint_every: int | None = 10000
     validation_steps: int = 50
 
     learning_rate: float = 1e-5
@@ -73,7 +82,11 @@ class TrainConfig(BaseModel):
     ## FSDP or DDP
     data_parallel: str = "ddp"  # "deepspeed", "ddp" or "fsdp"
     sharding_strategy: str = "full-shard"
-    deepspeed_config: str = "src/InternVLA/config/deepseeds/zero3.json"
+    # Resolved against the repo root by model_post_init below; keep it relative so
+    # the same default works from a container checkout (e.g. /workspace). The old
+    # src/InternVLA/... path does not exist in this repo, so any run with
+    # data_parallel=deepspeed and no explicit override failed at plugin setup.
+    deepspeed_config: str = "scripts/deepspeed/zero3.json"
     enable_gradient_checkpointing: bool = True
     enable_mixed_precision_training: bool = True
     reduce_in_full_precision: bool = True
@@ -98,6 +111,7 @@ class TrainConfig(BaseModel):
             raise ValueError(
                 "Only one of max_training_steps or num_train_epochs can be set"
             )
+
         return self
 
     def model_post_init(self, __context: Any) -> None:
@@ -115,10 +129,29 @@ class ServerConfig(BaseModel):
     port: int = 21074
     device: str = "cuda:0"
     policy: str | None = None
+    # Rows of each predicted chunk that /act returns, i.e. what the client executes
+    # before asking again.
     action_exec_horizon: int | None = None
     rtc: bool = False
-    run_dir: str 
-    ckpt_step: int 
+    run_dir: str
+    ckpt_step: int | str | None = "latest"
+    
+    embodiment_tag: str = "decoupled_wbc_g1"
+    dashboard: bool = False  # live htop/nvtop-style terminal dashboard (TTY only)
+    ctrl_hz: float = 30.0          # control-loop frequency
+    min_exec_horizon: int | None = None
+    delay_buf_size: int = 6        # recent-delay window length; max() over it feeds next inference_delay
+    initial_delay: int = 6         # bootstrap inference delay (ticks), before any is measured
+    cfg_scale: float = 1.0         # goal-image classifier-free guidance; 1.0=off, try 1.5~3.0
+    
+    rtc_mode: str = "auto"
+    rtc_inference_delay: int | None = None
+    pig_guidance_weight: float = 5.0    # test_time only: cap on the PiGDM step size
+    pig_mask_schedule: str = "exponential"   # test_time only: exponential|linear|hard|simple
+    pig_sigma_threshold: float = 0.15
+    pig_guidance_alpha: float = 0.9
+
+    num_inference_steps: int = 8
 
     @model_validator(mode="after")
     def set_policy(self):
@@ -131,7 +164,7 @@ class ServerConfig(BaseModel):
 class DataConfig(BaseModel):
     transform: DataTransform
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> "TransformableDataset":
         raise NotImplementedError
     
 class ModelConfig(BaseModel): 

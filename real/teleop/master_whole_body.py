@@ -140,12 +140,12 @@ class RobotTaskmaster:
         for i in range(self.extra_history_len):
             self.extra_history_buf.append(np.zeros(self.n_proprio))
         
-        self.adapter = torch.jit.load("adapter_jit.pt", map_location=self.device)
+        self.adapter = torch.jit.load(os.path.join(current_dir, "adapter_jit.pt"), map_location=self.device)
         self.adapter.eval()
         for param in self.adapter.parameters():
             param.requires_grad = False
         
-        norm_stats = torch.load("adapter_norm_stats.pt", weights_only=False)
+        norm_stats = torch.load(os.path.join(current_dir, "adapter_norm_stats.pt"), weights_only=False)
         self.input_mean = torch.tensor(norm_stats['input_mean'], device=self.device, dtype=torch.float32)
         self.input_std = torch.tensor(norm_stats['input_std'], device=self.device, dtype=torch.float32)
         self.output_mean = torch.tensor(norm_stats['output_mean'], device=self.device, dtype=torch.float32)

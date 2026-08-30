@@ -1,6 +1,9 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from psi.config.config import DataConfig
+if TYPE_CHECKING:
+    from psi.data.dataset import TransformableDataset
 
 class HERawDataConfig(DataConfig):
     root_dir: str
@@ -10,7 +13,7 @@ class HERawDataConfig(DataConfig):
     use_delta_actions: bool = True
     upsample_rate: int = 1
 
-    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> Any:
+    def __call__(self, split: str = "train", transform_kwargs={}, **kwargs) -> TransformableDataset:
         from psi.data.humanoid.he_raw_dataset import HERawDataset
         from psi.data.dataset import Dataset as MapStyleDataset
         

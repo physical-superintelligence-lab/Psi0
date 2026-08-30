@@ -17,6 +17,7 @@ import os
 import re
 import importlib
 from torch.utils.data import DataLoader, Dataset
+from psi.data.dataset import TransformableDataset
 import torch.nn as nn
 import numpy as np
 import datetime
@@ -40,8 +41,8 @@ class Trainer(ABC):
     optimizer: torch.optim.Optimizer 
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler
 
-    train_dataset: Dataset
-    val_dataset: Optional[Dataset]
+    train_dataset: TransformableDataset
+    val_dataset: Optional[TransformableDataset]
 
     def __init__(self, cfg: LaunchConfig, device: Union[torch.device, int]):
         self.device = torch.device(device)
@@ -97,7 +98,7 @@ class Trainer(ABC):
 
     def get_fsdp_plugin(self) -> accelerate.utils.FullyShardedDataParallelPlugin | None: ...
 
-    def create_datasets(self) -> tuple[Dataset, Dataset|None]: 
+    def create_datasets(self) -> tuple[TransformableDataset, TransformableDataset|None]:
         ...
 
     def create_dataloaders(

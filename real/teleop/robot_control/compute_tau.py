@@ -17,7 +17,7 @@ sys.path.append(parent2_dir)
 
 class GetTauer:
     def __init__(self):
-        robot = pin.RobotWrapper.BuildFromURDF("../assets/g1/g1_body29_hand14.urdf", "../assets/g1/")
+        robot = pin.RobotWrapper.BuildFromURDF("./assets/g1/g1_body29_hand14.urdf", "./assets/g1/")
 
         mixed_jointsToLockIDs = [
             "left_hip_pitch_joint",

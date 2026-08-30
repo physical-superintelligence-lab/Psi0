@@ -2,7 +2,7 @@
 
 set -e
 
-source .venv-psi/bin/activate
+source "${PSI_VENV:-$([ -d /workspace/.venv-psi ] && echo /workspace/.venv-psi || echo .venv-psi)}/bin/activate"
 
 export OMP_NUM_THREADS=8
 export TF_CPP_MIN_LOG_LEVEL=3

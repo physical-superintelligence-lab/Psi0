@@ -1,0 +1,85 @@
+name: psi
+
+# Psi-0 services on the training image.
+#
+#   docker compose build psi                 # the only service that builds
+#   docker compose up serve-psi0-sonic-http  # reuses that image, never rebuilds
+#   docker compose run --rm psi              # interactive shell in the same env
+#
+# The image carries dependencies only. `src/` and `.runs/` are bind-mounted, so
+# editing policy or server code needs a container restart, never a rebuild --
+# `uv sync` installed the project editable and site-packages resolves `psi`
+# through a .pth pointing at /workspace/src.
+
+# Shared runtime. Deliberately excludes `build:` so that only the `psi` service
+# below owns the image; every other service consumes it.
+x-psi-runtime: &psi-runtime
+  image: psi:${PSI_TAG:-train}
+  runtime: nvidia
+  # The server binds 0.0.0.0:8014 on the host directly, so a client on this
+  # machine reaches it at 127.0.0.1:8014 -- including SIMPLE's eval-sonic-wbc,
+  # which is also host-networked.
+  network_mode: host
+  working_dir: /workspace
+
+  # PSI_HOME/DATA_HOME/... plus HF_TOKEN. Values naming host paths are
+  # overridden below where the container sees a different mount point.
+  env_file:
+    - .env
+  environment:
+    - NVIDIA_VISIBLE_DEVICES=${GPUS:-0}
+    - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    - PYTHONUNBUFFERED=1
+
+  volumes:
+    # Editable install: host edits land in the container as-is.
+    - type: bind
+      source: ./src
+      target: /workspace/src
+    # Checkpoints. --run-dir is relative to working_dir.
+    - type: bind
+      source: ./.runs
+      target: /workspace/.runs
+    # The code resolves storage through $PSI_HOME alone -- $PSI_HOME/cache,
+    # /data, /.data and /.runs all appear in src/ -- so mount that one tree at
+    # the same path rather than picking children. The repo's gitignored .cache
+    # and .data symlinks point into it, and HF_HOME, TORCH_HOME, UV_CACHE_DIR,
+    # DATA_HOME and HF_LEROBOT_HOME from .env then resolve untouched. A cold
+    # cache means the first request re-downloads the VLM processor -- the
+    # checkpoint dir ships weights and configs only.
+    - type: bind
+      source: ${PSI_HOME:-/hfm}
+      target: ${PSI_HOME:-/hfm}
+
+  shm_size: "16gb"
+  stdin_open: true
+  tty: true
+
+services:
+  # Owns the image. `docker compose build psi` is the only build you need; with
+  # no other service declaring `build:`, a bare `docker compose build` does the
+  # same thing. Also doubles as a shell for poking at the environment.
+  psi:
+    <<: *psi-runtime
+    build:
+      context: .
+      dockerfile: scripts/train/Dockerfile
+    command: ["bash"]
+
+  # Every argument below is overridable from the shell or .env, e.g.
+  #   PORT=9000 ACTION_EXEC_HORIZON=15 docker compose up serve-psi0-sonic-http
+  #   RUN=my-other-run docker compose up serve-psi0-sonic-http
+  #   RTC_FLAG=--no-rtc docker compose up serve-psi0-sonic-http
+  # The program is the entrypoint, so `docker compose run` can also replace the
+  # whole argument list without repeating it:
+  #   docker compose run --rm serve-psi0-sonic-http --help
+  serve-psi0-sonic-http:
+    <<: *psi-runtime
+    entrypoint: ["serve_psi0_sonic_http"]
+    command:
+      - --policy=${POLICY:-psi0}
+      - --port=${PORT:-8014}
+      - --ckpt-step=${CKPT_STEP:-40000}
+      - --run-dir=${RUN_DIR:-.runs/finetune/${RUN:-sonic-wbcbox.neckle.flow1000.cosine.lr1.0e-04.b256.gpus8.2608260223}}
+      - ${RTC_FLAG:---rtc}
+      - --action-exec-horizon=${ACTION_EXEC_HORIZON:-24}

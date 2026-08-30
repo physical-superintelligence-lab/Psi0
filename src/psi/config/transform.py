@@ -5,23 +5,54 @@ import base64
 import copy
 import json
 import math
+import random
 import time
 from io import BytesIO
 from typing import (TYPE_CHECKING, Annotated, Any, Dict, List, Optional, Tuple,
                     Union)
+from typing_extensions import Self, Annotated
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from torchvision.transforms import v2
 from psi.config.augmentation import *
 from psi.utils import get_asset_dir, pt_to_pil, resolve_path, pad_to_len
 
 IGNORE_INDEX = -100
 
+
 class RepackTransform(BaseModel):
+    dataset_name: str = "default"
+    goal_sampling: bool = False
+    goal_future_offsets: List[float] = Field(default_factory=lambda: [1.0, 2.0, 3.0, 4.0])
+    goal_end_segment_prob: float = 0.5
+
+    # When True and meta/paraphrases.json was loaded for this dataset, render the
+    # task/subtask prompt from a random member of {canonical}+full+simple per sample.
+    use_paraphrases: bool = False
+    _para_lookup: dict | None = PrivateAttr(default=None)
+
+    def set_paraphrases(self, table: dict | None) -> None:
+        if not table:
+            self._para_lookup = None
+            return
+        lut: dict[str, dict[str, list[str]]] = {}
+        for section in ("tasks", "subtasks"):
+            lut[section] = {
+                str(canon).strip().lower(): [str(canon), *v.get("full", []), *v.get("simple", [])]
+                for canon, v in (table.get(section) or {}).items()
+            }
+        self._para_lookup = lut
+
+    def _maybe_paraphrase(self, text: str, section: str, is_training: bool) -> str:
+        if not (self.use_paraphrases and is_training) or self._para_lookup is None or not text:
+            return text
+        cands = self._para_lookup.get(section, {}).get(str(text).strip().lower())
+        return random.choice(cands) if cands else text
+
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
         return data
 
@@ -35,6 +66,39 @@ class ModelTransform(BaseModel):
         return data
 
 class FieldTransform(BaseModel):
+
+    @staticmethod
+    def _bounds(field_transform) -> Tuple[np.ndarray, np.ndarray]:
+        los, his = [], []
+        # modality_dims: dict[str, int] = {}
+        for action_key in field_transform.action_transform.apply_to:
+            mode = field_transform.action_transform.normalization_modes.get(action_key, "min_max")
+            stats = field_transform.action_transform.normalization_statistics.get(action_key, {})
+            if not stats:
+                continue
+            if mode in ("min_max", "bounds"):
+                lo = np.array(stats["min"], dtype=np.float32)
+                hi = np.array(stats["max"], dtype=np.float32)
+            elif mode in ("q99", "bounds_q99"):
+                lo = np.array(stats["q01"], dtype=np.float32)
+                hi = np.array(stats["q99"], dtype=np.float32)
+            elif mode == "mean_std":
+                std = np.array(stats["std"], dtype=np.float32)
+                mean = np.array(stats["mean"], dtype=np.float32)
+                lo, hi = mean - std, mean + std
+            else:
+                raise NotImplementedError(f"Unsupported normalization mode for denormalization: {mode}")
+            los.append(lo)
+            his.append(hi)
+            # modality_dims[action_key] = lo.shape[0]
+        if not los:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+        return np.concatenate(los), np.concatenate(his) #, modality_dims
+
+    def denormalize_L1_action_err(self, L1_err, dataset_name: list[str]):
+        # overwrite by subclass
+        ...
+
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
         return data
 
@@ -42,7 +106,7 @@ class DataTransform(BaseModel):
     repack: RepackTransform
     model: ModelTransform
     field: FieldTransform
-    
+
     def __call__(self, data:dict[str, Any], **kwargs) -> dict[str, Any]:
         data = self.repack(data, **kwargs)
         data = self.field(data, **kwargs)
@@ -70,6 +134,110 @@ class EgodexRepackTransform(BaseModel):
             instruction=data["instruction"].lower(),
             dataset=data.get("dataset_name", self.dataset_name),
             actions_mask=mask, #(Tp, Da)
+        )
+        
+class EgoverseRepackTransform(BaseModel):
+    """Repack raw EgoVerse data into the standard Psi 48 DoF action format.
+
+    Input keys (from EgoVerseDataset / MultiDataset):
+        observations.images.front_img_1  : torch.Tensor [3, H, W] float32 in [0,1]
+        actions_keypoints                : torch.Tensor [T, 140]
+        observations.state.keypoints     : torch.Tensor [140]
+        embodiment                       : str  "aria" | "mecka" | "scale"
+        metadata.task_description : str instruction
+
+    140-dim layout (keypoints_headframe_quat):
+        [0:7]    left wrist  (xyz + wxyz quaternion)
+        [7:70]   left  21 keypoints x 3 = 63 dims (head frame)
+        [70:77]  right wrist (xyz + wxyz quaternion)
+        [77:140] right 21 keypoints x 3 = 63 dims (head frame)
+
+    Output 48-dim (24 per arm):
+        [0:3]   wrist xyz
+        [3:9]   wrist 6D rotation (first two cols of R)
+        [9:24]  5 fingertip xyz (thumb, index, middle, ring, pinky)
+    """
+
+    dataset_name: str = "egoverse"
+    pad_action_dim: int | None = None
+    pad_state_dim: int | None = None
+
+    @staticmethod
+    def _to_numpy(t) -> np.ndarray:
+        if isinstance(t, torch.Tensor):
+            return t.detach().cpu().numpy()
+        return np.asarray(t, dtype=np.float32)
+
+    @staticmethod
+    def _quat_wxyz_to_rot6d(q: np.ndarray) -> np.ndarray:
+        """q: (..., 4) wxyz → (..., 6) first two columns of rotation matrix."""
+        w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+        col0 = np.stack([1 - 2*(y*y + z*z), 2*(x*y + w*z), 2*(x*z - w*y)], axis=-1)
+        col1 = np.stack([2*(x*y - w*z), 1 - 2*(x*x + z*z), 2*(y*z + w*x)], axis=-1)
+        return np.concatenate([col0, col1], axis=-1)
+
+    @staticmethod
+    def _fingertip_indices(embodiment: str) -> list:
+        """Return 5 fingertip joint indices within the 21-joint array."""
+        e = embodiment.lower()
+        if "mecka" in e or "scale" in e:
+            # MediaPipe ordering: THUMB_TIP=4, INDEX_TIP=8, MIDDLE_TIP=12, RING_TIP=16, PINKY_TIP=20
+            return [4, 8, 12, 16, 20]
+        # Aria ordering: THUMB_TIP=0, INDEX_TIP=1, MIDDLE_TIP=2, RING_TIP=3, PINKY_TIP=4
+        return [0, 1, 2, 3, 4]
+
+    def _convert_140_to_48(self, kp: np.ndarray, embodiment: str) -> np.ndarray:
+        """(..., 140) keypoints → (..., 48) compact representation."""
+        left_wrist = kp[..., 0:7]
+        left_kp21  = kp[..., 7:70].reshape(*kp.shape[:-1], 21, 3)
+        right_wrist = kp[..., 70:77]
+        right_kp21  = kp[..., 77:140].reshape(*kp.shape[:-1], 21, 3)
+
+        tip_idx = self._fingertip_indices(embodiment)
+
+        def arm_24(wrist, kp21):
+            xyz   = wrist[..., 0:3]
+            rot6d = self._quat_wxyz_to_rot6d(wrist[..., 3:7])
+            tips  = kp21[..., tip_idx, :].reshape(*kp21.shape[:-2], 15)
+            return np.concatenate([xyz, rot6d, tips], axis=-1)
+
+        return np.concatenate([arm_24(left_wrist, left_kp21),
+                                arm_24(right_wrist, right_kp21)], axis=-1)
+
+    def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
+        embodiment = data["embodiment"]
+
+        # Image: [3, H, W] float32 [0,1] → PIL RGB
+        img_np = self._to_numpy(data["observations.images.front_img_1"])
+        img_hw = (img_np * 255).clip(0, 255).astype(np.uint8).transpose(1, 2, 0)
+        observations = [Image.fromarray(img_hw)]
+
+        # State: [140] → [1, 48]
+        state_kp = self._to_numpy(data["observations.state.keypoints"]).astype(np.float32)
+        state_48 = self._convert_140_to_48(state_kp, embodiment)[np.newaxis]  # [1, 48]
+
+        # Actions: [T, 140] → [T, 48]
+        action_kp = self._to_numpy(data["actions_keypoints"]).astype(np.float32)
+        actions_48 = self._convert_140_to_48(action_kp, embodiment)  # [T, 48]
+
+        # Optional padding
+        states, _ = (pad_to_len(state_48, self.pad_state_dim)
+                     if self.pad_state_dim is not None else (state_48, None))
+        if self.pad_action_dim is not None:
+            actions, mask = pad_to_len(actions_48, self.pad_action_dim)
+        else:
+            actions = actions_48
+            mask = np.ones(actions.shape, dtype=bool)
+
+        instruction = data.get("metadata.task_description", "")
+
+        return dict(
+            observations=observations,          # list of PIL Image
+            states=states,                      # [1, 48]
+            actions=actions,                    # [T, 48]
+            instruction=instruction.lower(),
+            dataset=data.get("dataset_name", self.dataset_name),
+            actions_mask=mask,                  # [T, 48]
         )
 
 class HEPretrainRepackTransform(RepackTransform):
@@ -339,7 +507,7 @@ class RealRepackTransform(LerobotRepackTransform):
         states, _ = pad_to_len(data[self.state_key], self.pad_state_dim) if self.pad_state_dim is not None else (data[self.state_key], None)
 
         if self.pad_action_dim is not None:
-            actions, mask = pad_to_len(data[self.action_key], self.pad_action_dim) 
+            actions, mask = pad_to_len(data[self.action_key], self.pad_action_dim)
         else:
             actions = data[self.action_key]
             mask = np.ones_like(actions, dtype=bool)
@@ -396,7 +564,7 @@ class SimpleRepackTransform(LerobotRepackTransform):
             "actions_mask": mask
         }
 
-class IdentityTransform(BaseModel):
+class IdentityTransform(FieldTransform):
     # boilerplate transform config
     # define primitive data types only! eg., int, float, str
     # container types are allowed eg., list[int], dict[str, float]
@@ -517,7 +685,7 @@ class ActionStateTransform(FieldTransform):
         reversed_array = (array + 1) / 2 * (action_max - action_min) + action_min
         return reversed_array
 
-    def denormalize_L1_action_err(self, L1_err):
+    def denormalize_L1_action_err(self, L1_err, dataset_name: list[str] | None = None):
         """return denormalized L1 err loss"""
         
         array_class = torch.tensor if torch.is_tensor(L1_err) else np.array
@@ -541,7 +709,47 @@ class ActionStateTransform(FieldTransform):
                 result = where(action_norm_masks, 0.5 * L1_err * (high - low), L1_err) # type:ignore
             else:
                 result = 0.5 * L1_err * (high - low)
-            return result
+            
+            if dataset_name is None:
+                return result # backward compatibility
+            
+            # action L1 errors
+            avg_action_errors_denormed = result.mean(0)  # (Da,) NOTE only if the error is L1 (linear)
+            # hand_joints(14) + arm_joints(14) + rpy(3) + height(1) + vx + vy + vyaw + dyaw
+            # NOTE: the per-modality split below is HARDCODED to the legacy Psi0+AMO 36-D whole-body action layout.
+            assert avg_action_errors_denormed.shape[-1] == 36, (
+                "denormalize_L1_action_err per-modality breakdown is hardcoded to the G1 "
+                f"36-D whole-body action layout, but got action dim "
+                f"{avg_action_errors_denormed.shape[-1]}. Pass dataset_name=None to skip the "
+                "breakdown, or override denormalize_L1_action_err for this embodiment."
+            )
+            hand_joints_end = 14
+            arm_joints_end = 28
+            rpy_end = 31
+            height_end = 32
+            torso_vx_end = 33
+            torso_vy_end = 34
+            torso_vyaw_end = 35
+        
+            labels_denormed = [
+                "err_l1_hand_joints",
+                "err_l1_arm_joints",
+                "err_l1_torso_rpy",
+                "err_l1_height",
+                "err_l1_vx",
+                "err_l1_vy",
+                "err_l1_vyaw",
+                "err_l1_target_yaw",
+            ]
+        
+            avg_lr_action_err_denormed = np.split(
+                avg_action_errors_denormed, [
+                    hand_joints_end, arm_joints_end, rpy_end, height_end, torso_vx_end, torso_vy_end, torso_vyaw_end
+                ], axis=-1
+            )
+            dataset = dataset_name[0] if dataset_name is not None else "unknown"
+            return {dataset:dict(zip(labels_denormed, avg_lr_action_err_denormed))}
+            
         else:
             raise NotImplementedError
     
@@ -597,6 +805,7 @@ class Qwen3vlModelTransform(ModelTransform):
         no_aug: bool = False,
         vlm_processor = None, 
         action_tokenizer = None, 
+        is_eval: bool = False,
         **kwargs
     ) -> dict[str, Any]:
         if vlm_processor is None or action_tokenizer is None:
@@ -631,7 +840,7 @@ class Qwen3vlModelTransform(ModelTransform):
         state = data["states"]
         action = data["actions"]
         inputs, num_answer_tokens_list = self.build_qwenvl_inputs(
-            vlm_processor, action_tokenizer, [images], [instruction], [state], [action]
+            vlm_processor, action_tokenizer, [images], [instruction], [state], [action], is_eval=is_eval
         )
         labels = copy.deepcopy(inputs["input_ids"])
         # keep loss on the answer + EOS + formatting tokens
@@ -640,7 +849,7 @@ class Qwen3vlModelTransform(ModelTransform):
         inputs["dataset_name"] = data.get("dataset", "unknown")
         inputs["raw_actions"] = action
         # inputs["raw_instruction"] = instruction
-        inputs["raw_images"] = np.stack([np.array(img) for img in images])
+        inputs["observations"] = np.stack([np.array(img) for img in images])
         return inputs
 
     def build_qwenvl_inputs(
@@ -651,6 +860,7 @@ class Qwen3vlModelTransform(ModelTransform):
         instructions,
         states,
         actions,
+        is_eval: bool = False,
         **kwargs,
     ):
         """adapted from Qwen_VL_Interface.build_qwenvl_inputs"""
@@ -667,23 +877,26 @@ class Qwen3vlModelTransform(ModelTransform):
             num_answer_tokens = len(raw_action_tokens)
             num_answer_tokens_list.append(num_answer_tokens)
 
-            # print(action[0].shape)
+            message = []
             content = [{"type": "image", "image": img} for img in imgs]
             content.append({"type": "text", "text": instruction})
             user_msg = {"role": "user", "content": content}
-            assistant_msg = {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": tokenized_action}
-                ],  # squeeze batch dim
-            }
-            messages.append([user_msg, assistant_msg])
+            message.append(user_msg)
+            if not is_eval:
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": tokenized_action}
+                    ],  # squeeze batch dim
+                }
+                message.append(assistant_msg)
+            messages.append(message)
 
         # Prepare text prompts using processor
         # default process is json --> message --> texts --> input_ids
         texts = [
             vlm_processor.apply_chat_template(
-                m, tokenize=False, add_generation_prompt=False
+                m, tokenize=False, add_generation_prompt=is_eval
             )
             for m in messages
         ]
@@ -811,6 +1024,10 @@ class Psi0ModelTransform(ModelTransform):
     def __call__(
         self, data: dict[str, Any], vlm_processor=None, no_aug=False, **kwargs
     ) -> dict[str, Any]:
+        """
+            ...
+            data["observations"]: List of PIL Images
+        """
         do_img_aug = False if no_aug else self.img_aug
         if self.adaptive_resize:
             assert data["dataset"] is not None
@@ -832,7 +1049,7 @@ class Psi0ModelTransform(ModelTransform):
             center_crop,
             self.color_jitter() if do_img_aug else v2.Identity(),
         ])
-
+        
         images = [t1(img) for img in data["observations"]]
         instruction = data["instruction"]
 
@@ -844,7 +1061,7 @@ class Psi0ModelTransform(ModelTransform):
         if "actions_mask" in data:
             inputs["actions_mask"] = data["actions_mask"]
 
-        inputs["raw_images"] = images
+        inputs["observations"] = images
         inputs['actions'] = data["actions"]
         inputs['states'] = data["states"]
         inputs['instruction'] = data["instruction"]

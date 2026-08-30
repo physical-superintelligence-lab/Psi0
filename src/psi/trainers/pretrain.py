@@ -6,7 +6,8 @@ import os
 import torch.nn as nn
 import numpy as np
 import wandb
-from torch.utils.data import DataLoader, Dataset 
+from torch.utils.data import DataLoader
+from psi.data.dataset import TransformableDataset
 import accelerate
 from accelerate import Accelerator
 from psi.trainers import Trainer,worker_init_fn
@@ -109,7 +110,7 @@ class PretrainTrainer(Qwen3vlMixin, Trainer):
             **({"foreach": self.train_cfg.optimizer_foreach} if self.train_cfg.optimizer_foreach is not None else {}),
         ) # type:ignore
 
-    def create_datasets(self) -> tuple[Dataset, Dataset | None]:
+    def create_datasets(self) -> tuple[TransformableDataset, TransformableDataset | None]:
         if isinstance(self.model_cfg.action_tokenizer, FastActionTokenizerConfig):
             self.action_tokenizer = FastActionTokenizer(
                 self.tokenizer,self.data_cfg.chunk_size, self.Da, 
@@ -125,7 +126,7 @@ class PretrainTrainer(Qwen3vlMixin, Trainer):
         )
 
         self.train_dataset = self.data_cfg(split="train", transform_kwargs=transform_kwargs)
-        self.val_dataset = self.data_cfg(split="val", transform_kwargs=transform_kwargs)
+        self.val_dataset = None #self.data_cfg(split="val", transform_kwargs=transform_kwargs)
         return self.train_dataset, self.val_dataset
 
     def create_dataloaders(
@@ -182,10 +183,10 @@ class PretrainTrainer(Qwen3vlMixin, Trainer):
         else:
             self.train_dataloader = DataLoader(
                 train_dataset,
-                shuffle=shuffle, # 
+                shuffle=shuffle,
                 batch_sampler=batch_sampler,
-                generator=g, # 
-                batch_size=batch_size, # 
+                generator=g,
+                batch_size=batch_size,
                 collate_fn=collator,
                 num_workers=16,
                 worker_init_fn=worker_init_fn,

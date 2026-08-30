@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=128
+#SBATCH --cpus-per-task=120
 #SBATCH --time=23:30:00
 #SBATCH --signal=B:USR1@120
 #SBATCH --requeue
@@ -28,6 +28,19 @@ export CUDA_CACHE_PATH="$H100_JOB_CACHE_ROOT/nv"
 export TORCH_EXTENSIONS_DIR="$H100_JOB_CACHE_ROOT/torch_extensions"
 export XDG_CACHE_HOME="$H100_JOB_CACHE_ROOT/xdg-cache"
 
+# keep ONE persistent shared cache on beegfs scratch (per .env), pre-seeded.
+export HF_DATASETS_CACHE="/var/lib/h100-job-cache/${USER:-songlinwei}/hf-datasets"
+mkdir -p "$HF_DATASETS_CACHE" 2>/dev/null || true
+
+# Node-local staged dataset
+PSI_LOCAL_DATA=/var/lib/h100-job-cache/data
+if [ -d "$PSI_LOCAL_DATA/psix_sonic_v1_train/data" ]; then
+    export PSI_DATA_ROOT="$PSI_LOCAL_DATA"
+    echo "Data root:   $PSI_DATA_ROOT (node-local stage)"
+else
+    echo "Data root:   .data (BeeGFS - node not staged; expect metadata pressure)"
+fi
+
 # Enroot runtime/data/cache paths are managed by /etc/enroot/enroot.conf.d/10-h100-defaults.conf.
 # Keep them node-local to avoid BeeGFS metadata pressure during Pyxis startup.
 MASTER_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
@@ -43,15 +56,14 @@ echo "Num nodes:   $NNODES"
 echo "Train cmd:   $TRAIN_CMD"
 
 
-# NCCL config — aligned with tested 48-GPU all-reduce reference
-# bond0.1417 is the VLAN-tagged IB interface; bond0 alone misses it
-export NCCL_SOCKET_IFNAME=ibp24s0,ibp25s0,ibp66s0,ibs5,ibs7,ibs8,ibs10,ibs11
-export NCCL_IB_DISABLE=0
-export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9,mlx5_10
-export NCCL_DEBUG=INFO
+# NCCL config. NCCL_IB_HCA is set per node by scripts/train/nccl_rails.sh in the
+# container step below -- mlx5_* numbering differs across nodes, and an export
+# here would apply the first node's list to all of them.
+# NCCL_SOCKET_IFNAME unset: bootstrap only; the default matches MASTER_ADDR.
+export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export NCCL_RAS_ENABLE=0
-export NCCL_NVLS_ENABLE=0
-export NCCL_MNNVL_ENABLE=0
+# Not on by default; without it a NCCL hang runs out the walltime instead of
+# failing into the --requeue path.
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONFAULTHANDLER=1
 # take everything offline
@@ -59,12 +71,6 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 # export WANDB_MODE=offline
-
-# Pin the wandb run id to the Slurm job id: scontrol requeue keeps the same
-# SLURM_JOB_ID, so the restarted job attaches to the SAME wandb run instead of
-# opening a new one. base.py only sets WANDB_RUN_ID if it is not already set.
-export WANDB_RUN_ID="slurm-${SLURM_JOB_ID}"
-export WANDB_RESUME=allow
 
 # --- Auto-requeue on walltime -----------------------------------------------
 # `#SBATCH --signal=B:USR1@120` makes Slurm send SIGUSR1 to THIS batch shell (the
@@ -88,9 +94,9 @@ srun_exit=0
 srun \
   --ntasks=$SLURM_NNODES \
   --ntasks-per-node=1 \
-  --container-image=/mnt/beegfs/containers/nvidia-pytorch-25.06-py3-cuda12.9.sqsh \
-  --container-mounts=/mnt/beegfs:/mnt/beegfs \
-  --container-workdir="$PROJECT_ROOT" \
+  --container-image=/mnt/beegfs/containers/psix.sqsh \
+  --container-mounts=/mnt/beegfs:/mnt/beegfs,"$PROJECT_ROOT":/workspace/psi0,/var/lib/h100-job-cache:/var/lib/h100-job-cache \
+  --container-workdir=/workspace/psi0 \
   bash -lc "
     export TMPDIR=\"$H100_JOB_CACHE_ROOT/tmp\"
     export TMP=\"\$TMPDIR\"
@@ -100,12 +106,9 @@ srun \
     mkdir -p \"\$TMPDIR\" \"$TRITON_HOME\" \"$TRITON_CACHE_DIR\" \"$TRITON_OVERRIDE_DIR\" \"$TRITON_DUMP_DIR\" \"$TORCHINDUCTOR_CACHE_DIR\" \"$CUDA_CACHE_PATH\" \"$TORCH_EXTENSIONS_DIR\" \"$XDG_CACHE_HOME\"
     export OMP_NUM_THREADS=16
     export CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+    # per-node rail selection (see the NCCL note above)
+    . /workspace/psi0/scripts/train/nccl_rails.sh
     export LIBRARY_PATH=/usr/local/cuda/lib64/stubs
-    export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:\${LD_LIBRARY_PATH:-}
-    export FFMPEG_DIR=/mnt/beegfs/shared/miniforge3/envs/py311
-    export PATH=\$FFMPEG_DIR/bin:\$PATH
-    export IMAGEIO_FFMPEG_EXE=\$FFMPEG_DIR/bin/ffmpeg
-    export LD_LIBRARY_PATH=\$FFMPEG_DIR/lib:\$LD_LIBRARY_PATH
     export NNODES=$NNODES
     export NODE_RANK=\$SLURM_PROCID
     export MASTER_ADDR=$MASTER_ADDR

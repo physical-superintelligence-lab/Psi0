@@ -495,7 +495,7 @@ class Server:
     
 
     def _setup_routes(self):
-        """设置所有路由"""
+        """Set up all the API endpoints including both WebSocket and HTTP routes"""
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             self._loop = asyncio.get_event_loop()

@@ -1,5 +1,11 @@
 #!/bin/bash
 
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 export OMP_NUM_THREADS=32
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
@@ -15,8 +21,11 @@ if [ "$#" -lt 1 ]; then
     exit 1
 fi
 
+export task="$1"
+echo "Task: $task"
+
 torchrun --standalone --nnodes=1 --nproc_per_node=$NPROC_PER_NODE src/openpi/train_pytorch.py \
         $task \
         --exp_name=$task \
-        --save_interval=10000 \
+        --save_interval=20000 \
         --checkpoint_base_dir=.runs/openpi-05

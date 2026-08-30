@@ -11,6 +11,7 @@ import contextlib
 import torch.nn.functional as F
 from typing import Dict, Optional, List, Union, Any, TYPE_CHECKING
 from torch.utils.data import DataLoader
+from psi.data.dataset import TransformableDataset
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor #, Qwen2TokenizerFast, Qwen3VLProcessor
 from psi.trainers.qwen3vl_mixin import PaddedCollatorForTogether
 
@@ -194,7 +195,7 @@ class PosttrainTrainer(Trainer):
             num_training_steps=num_training_steps, optimizer=optimizer
         )
 
-    def create_datasets(self):  # TODO use parent impl.
+    def create_datasets(self) -> tuple[TransformableDataset, TransformableDataset | None]:
         transform_kwargs=dict(
             vlm_processor=self.vlm_processor,
         )

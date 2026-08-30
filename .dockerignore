@@ -1,0 +1,22 @@
+# The repo root is ~80G on disk; only ship what the image actually needs.
+.git
+.venv*
+.runs*
+.logs
+.cache
+.data
+wandb/
+runs/
+checkpoints/
+**/__pycache__/
+**/*.egg-info/
+*.mp4
+
+# Large data / vendored trees not needed to build the env
+real/
+third_party/
+src/H_RDT/datasets/
+ml-egodex_dataset/
+
+.env
+.env.local
