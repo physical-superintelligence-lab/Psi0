@@ -1,14 +1,18 @@
 import os
-# Set working directory to project root (parent of examples/)
-os.chdir('/hfm/songlin/psi0')
-os.environ['PWD'] = '/hfm/songlin/psi0'
+from pathlib import Path
+
+# Set working directory to project root, so that load_dotenv() below finds the
+# repo .env and the relative run_dir resolves.
+# repo_root/src/psi/deploy/psi0_inference_real_sonic.py -> repo_root
+REPO_ROOT = Path(__file__).resolve().parents[3]
+os.chdir(REPO_ROOT)
+os.environ['PWD'] = str(REPO_ROOT)
 
 import dotenv
 dotenv.load_dotenv()
 
 import torch
 import numpy as np
-from pathlib import Path
 from psi.utils import parse_args_to_tyro_config  #, seed_everything, move_to_device, batchify
 from psi.config.config import LaunchConfig
 
