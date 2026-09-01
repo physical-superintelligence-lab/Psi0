@@ -1,11 +1,13 @@
-import torch
-from torch.utils.data import Sampler
-from accelerate import Accelerator
 import math
 import os
 import random
 from dataclasses import dataclass
+
+import torch
+from torch.utils.data import Sampler
+
 from psi.utils import initialize_overwatch
+
 overwatch = initialize_overwatch(__name__)
 
 class BatchMixtureSampler(Sampler):
@@ -22,8 +24,8 @@ class BatchMixtureSampler(Sampler):
         self.seed = seed
 
         # Distributed settings
-        self.rank = int(os.environ.get("RANK", 0))
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
         # each rank gets this many samples
         self.num_samples_rank = math.ceil(self.num_samples / self.world_size)
@@ -90,8 +92,8 @@ class TokenMixtureSampler(Sampler):
         self.epoch = 0
 
         # Distributed settings
-        self.rank = int(os.environ.get("RANK", 0))
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     def set_epoch(self, epoch):
         self.epoch = epoch
@@ -100,23 +102,24 @@ class TokenMixtureSampler(Sampler):
     def __iter__(self):
         # assert self.epoch is not None, "TokenMixtureSampler epoch not set. Please call set_epoch(epoch) before iterating."
 
-        # For each global batch index, synchronize dataset_id selection across all ranks
-        for batch_idx in range(self.num_batches_per_rank * self.world_size):
-            if batch_idx % self.world_size != self.rank:
-                continue
-            # Use a deterministic RNG for this global! batch to pick dataset_id and indices
-            batch_seed = self.seed + self.epoch + batch_idx #  // self.world_size
-            local_rng = random.Random(batch_seed)
-            dataset_id = local_rng.choices(range(len(self.specs)), weights=self.probs, k=1)[0]
-            # print(f"[TokenMixtureSampler] rank={self.rank} seed={batch_seed} dataset_id={dataset_id}")
+        # Synchronize dataset selection for each logical batch across all ranks.
+        for batch_idx in range(self.num_batches_per_rank):
+            epoch_batch_idx = self.epoch * self.num_batches_per_rank + batch_idx
+            dataset_rng = random.Random(f"{self.seed}:dataset:{epoch_batch_idx}")
+            dataset_id = dataset_rng.choices(
+                range(len(self.specs)), weights=self.probs, k=1
+            )[0]
             spec = self.specs[dataset_id]
             batch_size = max(1, self.tokens_per_batch // spec.tokens_per_image)
-            local_batch_rng = random.Random(self.seed + self.epoch + batch_idx)
+            # Sample different examples on every rank without reusing the previous
+            # epoch's random streams.
+            local_batch_rng = random.Random(
+                f"{self.seed}:samples:{epoch_batch_idx}:rank:{self.rank}"
+            )
             indices = [
                 (dataset_id, local_batch_rng.randrange(spec.dataset_length))
                 for _ in range(batch_size)
             ]
-            # overwatch.info(f"rank {overwatch.rank()}:  {self.epoch} batch {batch_idx} dataset_id {dataset_id} batch_size {batch_size}")
             yield indices
 
     def __len__(self):
