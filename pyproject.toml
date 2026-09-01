@@ -52,6 +52,7 @@ serve = [
 ]
 
 viz = [
+    "matplotlib",
     "transforms3d>=0.4.2",
     "vuer[all]>=0.0.68",
     "viser>=1.0.15",
@@ -64,7 +65,7 @@ psi = [
     "torch==2.7.0",
     "torchvision==0.22.0",
     "torchcodec==0.4.0",
-    "transformers==4.57.0",
+    "transformers==4.57.1",
     "deepspeed==0.17.1",
     #"flash_attn==2.7.4.post1",
     "triton==3.3.0",
