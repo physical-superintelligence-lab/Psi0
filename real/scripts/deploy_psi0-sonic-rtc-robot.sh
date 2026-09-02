@@ -26,12 +26,14 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# from sonic: this launcher lives in psi's real/scripts/, but the actual deploy
-# (policy/, planner/, reference/, scripts/, justfile, C++ build) lives in the
-# GR00T-WholeBodyControl submodule's gear_sonic_deploy/. cd there so every
-# relative path below resolves correctly.
 LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_DIR="$(cd "$LAUNCHER_DIR/../../third_party/GR00T-WholeBodyControl/gear_sonic_deploy" && pwd)"
+PSI_ROOT="$(cd "$LAUNCHER_DIR/../.." && pwd)"
+source "$PSI_ROOT/real/SONIC/scripts/sonic_conda_env.sh"
+SCRIPT_DIR="$SONIC_DIR/gear_sonic_deploy"
+if [[ ! -f "$SCRIPT_DIR/thirdparty/unitree_sdk2/CMakeLists.txt" ]]; then
+    echo "Missing complete SONIC deploy tree: $SCRIPT_DIR" >&2
+    exit 1
+fi
 cd "$SCRIPT_DIR"
 
 # ============================================================================
@@ -214,7 +216,7 @@ show_usage() {
     echo "  --obs-config PATH       Set the observation config file (default: policy/configs/example.yaml)"
     echo "  --planner PATH          Set the planner model path (default: planner/example.onnx)"
     echo "  --motion-data PATH      Set the motion data path (default: reference/example/)"
-    echo "  --input-type TYPE       Set the input type (default: zmq)"
+    echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
     echo "  --default-motion NAME   Set the default motion to load on startup"
@@ -242,8 +244,8 @@ show_usage() {
 INTERFACE_MODE="real"
 
 # Default configuration values (can be overridden by command line)
-CHECKPOINT_DEFAULT="policy/release/model"
-OBS_CONFIG_DEFAULT="policy/release/observation_config.yaml"
+CHECKPOINT_DEFAULT="${SONIC_CHECKPOINT:-policy/sonic_v1_1/model}"
+OBS_CONFIG_DEFAULT="${SONIC_OBS_CONFIG:-policy/sonic_v1_1/observation_config.yaml}"
 PLANNER_DEFAULT="planner/target_vel/V2/planner_sonic.onnx"
 MOTION_DATA_DEFAULT="reference/example/"
 INPUT_TYPE_DEFAULT="zmq"
@@ -506,9 +508,32 @@ set +e  # Temporarily allow errors (for jetson_clocks on non-Jetson systems)
 source scripts/setup_env.sh
 set -e  # Re-enable exit on error
 
-# Always build to ensure we have the latest version
-echo "Building the project..."
-just build
+# ROS2's CycloneDDS is ABI-incompatible with the type maps bundled in the
+# Unitree SDK. setup_env.sh adds ROS2 to LD_LIBRARY_PATH, so explicitly put the
+# matching Unitree runtime first before launching the controller.
+case "$(uname -m)" in
+    x86_64) UNITREE_ARCH="x86_64" ;;
+    aarch64|arm64) UNITREE_ARCH="aarch64" ;;
+    *) echo "Unsupported SONIC deploy architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+UNITREE_DDS_LIB="$SCRIPT_DIR/thirdparty/unitree_sdk2/thirdparty/lib/$UNITREE_ARCH"
+export LD_LIBRARY_PATH="$UNITREE_DDS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+DEPLOY_BINARY="$SCRIPT_DIR/target/release/g1_deploy_onnx_ref"
+if [[ -x "$DEPLOY_BINARY" && "${FORCE_SONIC_REBUILD:-0}" != "1" ]]; then
+    echo "Using existing SONIC deploy binary: $DEPLOY_BINARY"
+else
+    echo "Building the project..."
+    if [[ -f /usr/src/googletest/CMakeLists.txt ]]; then
+        HAS_ROS2=0 cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/usr/src/googletest
+        cmake --build build --target g1_deploy_onnx_ref -j"$(nproc)"
+    else
+        HAS_ROS2=0 just build
+    fi
+fi
 
 echo ""
 
