@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export OMP_NUM_THREADS=32
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-32}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
 source "${PSI_VENV:-$([ -d /workspace/.venv-psi ] && echo /workspace/.venv-psi || echo .venv-psi)}/bin/activate"
@@ -28,24 +28,24 @@ finetune_real_psi0_config \
 --seed=292285 \
 --exp=$exp \
 --train.name=sonic \
---train.data_parallel=ddp \
---train.mixed_precision=bf16 \
---train.train_batch_size=16 \
+--train.data_parallel=${TRAIN_DATA_PARALLEL:-ddp} \
+--train.mixed_precision=${TRAIN_MIXED_PRECISION:-bf16} \
+--train.train_batch_size=${TRAIN_BS:-16} \
 --train.max_checkpoints_to_keep=5 \
---train.gradient_accumulation_steps=1 \
---train.learning_rate=1e-4 \
---train.max_training_steps=40000 \
+--train.gradient_accumulation_steps=${GRAD_ACCUM_STEPS:-1} \
+--train.learning_rate=${LEARNING_RATE:-1e-4} \
+--train.max_training_steps=${MAX_STEPS:-40000} \
 --train.warmup_ratio=None \
---train.warmup_steps=1000 \
---train.checkpointing_steps=5000 \
---train.validation_steps=1000 \
---train.val_num_batches=20 \
+--train.warmup_steps=${WARMUP_STEPS:-1000} \
+--train.checkpointing_steps=${CHECKPOINTING_STEPS:-5000} \
+--train.validation_steps=${VALIDATION_STEPS:-1000} \
+--train.val_num_batches=${VAL_NUM_BATCHES:-20} \
 --train.max_grad_norm=1.0 \
 --train.lr_scheduler_type=cosine \
 --train.lr_scheduler_kwargs.weight_decay=1e-6 \
 --train.lr_scheduler_kwargs.betas 0.95 0.999 \
---log.report_to=wandb \
---data.root_dir=/hfm/data/sonic/lerobot \
+--log.report_to=${LOG_REPORT_TO-wandb} \
+--data.root_dir=${SONIC_LEROBOT_ROOT:-/hfm/data/sonic/lerobot} \
 --data.train_repo_ids=$task \
 --data.transform.field.stat-path=meta/stats_psi0.json \
 --data.transform.field.stat-action-key=action \
@@ -56,8 +56,8 @@ finetune_real_psi0_config \
 --data.transform.model.img-aug \
 --data.transform.model.resize.size 240 320 \
 --data.transform.model.center_crop.size 240 320 \
---model.model_name_or_path=/hfm/cache/checkpoints/psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k \
---model.pretrained-action-header-path=/hfm/cache/checkpoints/psi0/postpre.1by1.pad36.2601131206.ckpt.he30k \
+--model.model_name_or_path=${PSI0_MODEL_PATH:-/hfm/cache/checkpoints/psi0/pre.fast.1by1.2601091803.ckpt.ego200k.he30k} \
+--model.pretrained-action-header-path=${PSI0_ACTION_HEADER_PATH:-/hfm/cache/checkpoints/psi0/postpre.1by1.pad36.2601131206.ckpt.he30k} \
 --model.noise-scheduler=flow \
 --model.train-diffusion-steps=1000 \
 --model.n_conditions=0 \
@@ -73,6 +73,12 @@ finetune_real_psi0_config \
 --model.rtc \
 --model.max-delay=8
 "
+
+if [ -n "${RESUME_FROM_CHECKPOINT:-}" ]; then
+    args="$args
+--train.resume_from_checkpoint=${RESUME_FROM_CHECKPOINT}
+"
+fi
 
 # Find an available TCP port starting at 29500 and increment until a free port is found.
 find_free_port() {

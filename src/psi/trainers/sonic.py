@@ -26,6 +26,7 @@ from psi.utils import (
     initialize_overwatch,
     shorten
 )
+from psi.utils.attention import qwen3vl_attn_implementation
 from psi.utils.utils import batch_str_to_tensor
 
 overwatch = initialize_overwatch(__name__)
@@ -92,7 +93,7 @@ class SonicTrainer(Trainer):
     def init_qwen3vl_models(self):
         vlm_model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_cfg.model_name_or_path,
-            attn_implementation="flash_attention_2",
+            attn_implementation=qwen3vl_attn_implementation(),
             dtype=torch.bfloat16
         )
         overwatch.info(f"Load pretrained VLM model from {self.model_cfg.model_name_or_path}")
@@ -234,8 +235,10 @@ class SonicTrainer(Trainer):
     def create_dataloaders(self, train_dataset, val_dataset):
         g = torch.Generator()
         g.manual_seed(self.cfg.seed or 42)
+        train_num_workers = int(os.environ.get("PSI_TRAIN_NUM_WORKERS", "12"))
+        val_num_workers = int(os.environ.get("PSI_VAL_NUM_WORKERS", "12"))
         train_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": train_num_workers,
             "drop_last": True,
             "shuffle": True,
             "generator": g,
@@ -244,7 +247,7 @@ class SonicTrainer(Trainer):
         }
 
         val_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": val_num_workers,
             "drop_last": False,
             # "pin_memory": True,
             "persistent_workers": True,
