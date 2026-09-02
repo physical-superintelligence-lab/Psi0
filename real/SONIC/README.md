@@ -189,29 +189,6 @@ Invalid recordings are preserved on disk with SONIC's official discarded
 metadata instead of being deleted or overwritten. Partial stale SMPL is only
 reported and is handled later by the official dataset processor.
 
-### Optional POSE versus VR_3PT diagnostic
-
-The comparison utility remains available for offline diagnostics, but it is
-not part of the full-body collection path. Never mix its VR_3PT recordings
-into the formal POSE dataset.
-
-Process the POSE dataset with the official defaults. Process VR_3PT with
-`--no-remove-stale-smpl`; its `teleop.smpl_pose` is intentionally all zero.
-Before Psi0 conversion, compare the raw recordings while their teleop fields
-are still present:
-
-```bash
-python scripts/data/compare_sonic_modes.py \
-  --pose-dir "$HOME/data/sonic_ab/pose_<task>" \
-  --vr3pt-dir "$HOME/data/sonic_ab/vr3pt_<task>" \
-  --output-json "$HOME/data/sonic_ab/<task>_comparison.json"
-```
-
-The report validates the expected stream mode and measures lower-body, waist,
-and arm range/step motion, projected-gravity tilt, planner movement, and
-SMPL/VR_3PT activity. Task success and time still require the operator's
-physical observation; the script does not infer grasp success from joint data.
-
 ## Pico ego view
 
 The G1 `ego_view` runs in the independent tmux session
