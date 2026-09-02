@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# SONIC collection uses ZMQ only.  Disabling the optional ROS2 input avoids
+# ROS Humble's generated include subdirectories shadowing glibc headers.
+# setup_env.sh still sources ROS and prepends its CycloneDDS at runtime.  The
+# binary is linked against Unitree's bundled CycloneDDS, so keep that matching
+# pair first to avoid cross-ABI heap corruption during ChannelFactory init.
+set -euo pipefail
+export HAS_ROS2=0
+
+UNITREE_DDS_LIB="$(pwd -P)/thirdparty/unitree_sdk2/thirdparty/lib/$(uname -m)"
+if [ -d "$UNITREE_DDS_LIB" ]; then
+    export LD_LIBRARY_PATH="$UNITREE_DDS_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+exec "${REAL_JUST:-/usr/local/bin/just}" "$@"

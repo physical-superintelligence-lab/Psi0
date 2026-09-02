@@ -3,9 +3,6 @@ import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 import pandas as pd
-from dotenv import load_dotenv
-assert load_dotenv(), "Failed to load .env file. Make sure it exists and is properly formatted."
-
 
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
@@ -68,4 +65,3 @@ if __name__ == "__main__":
     le_statistics = calculate_dataset_statistics(parquet_files)
     with open(stats_path, "w") as f:
         json.dump(le_statistics, f, indent=4)
-    print(f"write to {stats_path}")
