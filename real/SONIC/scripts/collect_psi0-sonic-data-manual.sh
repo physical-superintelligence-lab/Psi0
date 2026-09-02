@@ -1,63 +1,48 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/sonic_conda_env.sh"
+# No-tmux version of collect_psi0-sonic-data.sh: run each component in its own
+# terminal. Use this if tmux is not available.
+#
+# Real robot (start the camera server on the robot first):
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh deploy     # 1) C++ controller
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh pico       # 2) PICO streamer
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh exporter   # 3) data exporter (records)
+#
+# Simulation teleop test (no robot/camera, no recording):
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh sim         # 1) MuJoCo sim
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh deploy sim  # 2) C++ controller (sim)
+#   bash ./real/SONIC/scripts/collect_psi0-sonic-data-manual.sh pico        # 3) PICO streamer
 
-ROBOT_IP="${ROBOT_IP:-192.168.123.164}"
-TASK="${TASK:-Pick up the corn plush toy and place it into the basket.}"
-DATASET_NAME="${DATASET_NAME:-corn_plush_mobile_sonic_v1_1}"
-FPS="${FPS:-30}"
-LOG_DIR="${SONIC_LOG_DIR:-$PSI_ROOT/.collect_logs}"
-ROOT_OUTPUT_DIR="${ROOT_OUTPUT_DIR:-$SONIC_DIR/outputs}"
-mkdir -p "$LOG_DIR"
+ROBOT_IP=192.168.123.164
+TASK="Pick bottle and turn and pour into cup."
+FPS=30
 
-case "${1:-}" in
+SONIC_DIR="$(cd "$(dirname "$0")/../../../third_party/GR00T-WholeBodyControl" && pwd)"
+cd "$SONIC_DIR"
+
+case "$1" in
     sim)
-        cd "$SONIC_DIR"
-        exec "$SONIC_PYTHON" "$PSI_ROOT/real/SONIC/run_sim_loop_single_dds.py"
+        source .venv_teleop/bin/activate
+        python gear_sonic/scripts/run_sim_loop.py
         ;;
     deploy)
-        cd "$SONIC_DIR/gear_sonic_deploy"
-        export PATH="$PSI_ROOT/real/SONIC/scripts/no_ros2_bin:$PATH"
-        exec ./deploy.sh \
-            --cp "$SONIC_CHECKPOINT" \
-            --obs-config "$SONIC_OBS_CONFIG" \
-            --input-type zmq_manager \
-            --output-type zmq "${2:-real}"
+        cd gear_sonic_deploy
+        source scripts/setup_env.sh
+        ./deploy.sh --input-type zmq_manager "${2:-real}"   # pass 'sim' as 2nd arg for sim mode
         ;;
     pico)
-        cd "$PSI_ROOT"
-        exec "$SONIC_PYTHON" -u real/SONIC/run_pico_manager_dex1.py \
-            --network "$G1_NETWORK_INTERFACE"
+        source .venv_teleop/bin/activate
+        python gear_sonic/scripts/pico_manager_thread_server.py --manager
         ;;
     exporter)
-        cd "$SONIC_DIR"
-        exec "$SONIC_PYTHON" -u "$PSI_ROOT/real/SONIC/run_data_exporter_dex1.py" \
+        source .venv_data_collection/bin/activate
+        python gear_sonic/scripts/run_data_exporter.py \
             --camera-host "$ROBOT_IP" \
-            --camera-port 5555 \
             --task-prompt "$TASK" \
-            --dataset-name "$DATASET_NAME" \
-            --root-output-dir "$ROOT_OUTPUT_DIR" \
-            --data-collection-frequency "$FPS" \
-            --no-text-to-speech
-        ;;
-    viewer)
-        cd "$SONIC_DIR"
-        exec "$SONIC_PYTHON" gear_sonic/scripts/run_camera_viewer.py \
-            --camera-host "$ROBOT_IP" --camera-port 5555
-        ;;
-    pico-view)
-        cd "$PSI_ROOT"
-        exec "$SONIC_PYTHON" -u real/teleop/pico_camera_view.py \
-            --camera-protocol sonic \
-            --camera-ip "$ROBOT_IP" --camera-port 5555 \
-            --camera-key ego_view --encoder pyav \
-            --listen-host "${PICO_VIDEO_HOST:-0.0.0.0}" \
-            --listen-port "${PICO_VIDEO_PORT:-13579}"
+            --data-collection-frequency "$FPS"
         ;;
     *)
-        echo "Usage: $0 {sim|deploy [sim]|pico|exporter|viewer|pico-view}" >&2
+        echo "Usage: $0 {sim|deploy [sim]|pico|exporter}   (run each in its own terminal)"
         exit 1
         ;;
 esac

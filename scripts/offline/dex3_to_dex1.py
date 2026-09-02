@@ -1,36 +1,21 @@
-"""Dex3(7-DOF 灵巧手)→ Dex1-1(单自由度夹爪)动作塌缩。
-
-psi0(psi-data real)输出 36 维动作,其中手部 14 维 = 左手 [0:7] + 右手 [7:14]
-(Dex3-1 每手 7 个关节角)。Dex1-1 只要一个开合标量/手。本模块把 7 维手塌缩成
-一个 openness ∈ [0,1](1=张开),再交给 RealDex11Driver 映射到夹爪 q。
-
-**数据驱动**:用数据集 action 的 per-joint min/max 把每个关节归一,聚合"活动关节"
-(量程 > 阈值的那些,即抓握时真正在动的关节)。**开/合方向**在不同 Dex3 关节符号
-约定下可能相反,故每手提供 `invert` 开关,真机/可视化标定时确定。
-
-设计上与 `RealDex11Driver`(send(Dex11Command), command.left/right ∈ [0,1],
-1=张开)衔接:本模块输出的 openness 直接作为 Dex11Command 分量。
-"""
+"""Reversible mapping between a virtual Dex3 hand14 and Dex1 openness."""
 from __future__ import annotations
 
-import argparse
 import json
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from scripts.offline.dex1_1_layout import Dex11Command  # noqa: E402
 
 HAND_DIM = 14          # 左7 + 右7
 LEFT_SLICE = (0, 7)
 RIGHT_SLICE = (7, 14)
 DEFAULT_RANGE_THRESHOLD = 0.3   # rad;量程小于此的关节视为"基本不动",不计入抓握
+
+
+@dataclass(frozen=True)
+class Dex11Command:
+    left: float
+    right: float
 
 
 @dataclass
@@ -70,17 +55,6 @@ class Dex3GraspMap:
 class Dex3ToDex1:
     left: Dex3GraspMap
     right: Dex3GraspMap
-
-    def to_command(self, action_or_hand) -> Dex11Command:
-        """接收 36 维动作或 14 维手,返回 Dex11Command(left,right ∈ [0,1])。"""
-        a = np.asarray(action_or_hand, np.float32)
-        if a.shape[-1] >= HAND_DIM:
-            hand = a[:HAND_DIM]
-        else:
-            raise ValueError(f"need >= {HAND_DIM} dims (action36 or hand14), got {a.shape}")
-        lo = self.left.openness(hand[LEFT_SLICE[0]:LEFT_SLICE[1]])
-        ro = self.right.openness(hand[RIGHT_SLICE[0]:RIGHT_SLICE[1]])
-        return Dex11Command(left=lo, right=ro)
 
     def hand14_to_command(self, hand14) -> Dex11Command:
         """将明确的虚拟 Dex3 hand14 映射回 Dex1 开度。
@@ -133,26 +107,3 @@ def load_from_stats_file(stats_path: str, **kw) -> Dex3ToDex1:
         s = json.load(f)
     a = s["action"]
     return build_from_stats(a["min"], a["max"], **kw)
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(description="Dex3->Dex1 塌缩:看某数据集的标定 + 试映射")
-    p.add_argument("--stats", required=True, help="数据集 meta/stats.json")
-    p.add_argument("--invert-left", action="store_true")
-    p.add_argument("--invert-right", action="store_true")
-    p.add_argument("--demo-parquet", default=None, help="可选:对某 parquet 首/中/末帧打印 openness")
-    args = p.parse_args()
-    m = load_from_stats_file(args.stats, invert_left=args.invert_left, invert_right=args.invert_right)
-    print("左手活动关节:", np.where(m.left.active)[0].tolist(),
-          "| 右手活动关节:", np.where(m.right.active)[0].tolist())
-    if args.demo_parquet:
-        import pandas as pd
-        df = pd.read_parquet(args.demo_parquet)
-        acts = np.stack([np.asarray(a, np.float32) for a in df["action"].values])
-        for name, t in [("首", 0), ("中", len(acts) // 2), ("末", len(acts) - 1)]:
-            cmd = m.to_command(acts[t])
-            print(f"  {name}帧[{t}] openness 左={cmd.left:.3f} 右={cmd.right:.3f}")
-
-
-if __name__ == "__main__":
-    main()

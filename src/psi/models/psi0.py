@@ -28,7 +28,6 @@ from transformers import Qwen3VLForConditionalGeneration, AutoConfig, AutoProces
 from qwen_vl_utils import process_vision_info
 
 from psi.utils import initialize_overwatch, count_parameters
-from psi.utils.attention import qwen3vl_attn_implementation
 
 # from InternVLA.model.modules.action_model.DiT_modules.models import DiT
 # from InternVLA.model.modules.projector.QFormer import CrossAttentionBlock
@@ -1645,7 +1644,12 @@ class Psi0Model(nn.Module):
 
         # init empty vlm backbone from config only (skip loading base pretrained weights)
         vlm_config = AutoConfig.from_pretrained(QWEN3VL_VARIANT)
-        vlm_config._attn_implementation = qwen3vl_attn_implementation()
+        # Attention backend: flash_attention_2 on CUDA (if installed), sdpa on XPU/CPU.
+        try:
+            from transformers.utils import is_flash_attn_2_available
+            vlm_config._attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+        except Exception:
+            vlm_config._attn_implementation = "sdpa"
         vlm_config.dtype = torch.bfloat16
         vlm_config.vision_config.dtype = torch.bfloat16
         vlm_config.text_config.dtype = torch.bfloat16

@@ -18,7 +18,6 @@ python realsense_server.py
 cd /path/to/Psi0
 export CHECKPOINT_DIR=/path/to/psi0-sonic-run
 export CHECKPOINT_STEP=40000
-export PSI_ATTN_IMPLEMENTATION=sdpa  # optional when flash-attn is unavailable
 bash scripts/deploy/serve_psi0-rtc-sonic.sh
 ```
 
@@ -28,7 +27,6 @@ Wait for `Application startup complete` before continuing.
 
 ```bash
 cd /path/to/Psi0
-export SONIC_DIR=/path/to/GR00T-WholeBodyControl  # optional; defaults to the submodule
 bash real/scripts/deploy_psi0-sonic-rtc-robot.sh real
 ```
 
@@ -46,6 +44,7 @@ bash real/scripts/deploy_psi0-sonic-rtc-client.sh \
   --port 8014 \
   --camera-address tcp://192.168.123.164:5558 \
   --network enp4s0 \
+  --instruction 'Pick up the object and place it in the container.' \
   --enable-dex1-live
 ```
 

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from scripts.offline.dex1_1_layout import Dex11Command
+from scripts.offline.dex3_to_dex1 import Dex11Command
 from scripts.offline.real_dex1_1_client import (
     Dex11Calibration,
     RealDex11Driver,

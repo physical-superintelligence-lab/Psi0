@@ -23,11 +23,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OFFICIAL_CLIENT = (
     REPO_ROOT / "third_party" / "GR00T-WholeBodyControl" / "psi_rtc_sonic_client.py"
 )
-DEFAULT_INSTRUCTION = (
-    "Move to the table, pick up the corn plush toy, and place it into the basket."
-)
-
-
 class _ControllerStateReader:
     def __init__(self, controller: Dex1_1_Controller) -> None:
         self.controller = controller
@@ -87,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zmq-topic", default="pose")
     parser.add_argument("--zmq-sub-topic", default="g1_debug")
     parser.add_argument("--camera-address", default="tcp://192.168.123.164:5558")
-    parser.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
+    parser.add_argument("--instruction", required=True)
     parser.add_argument("--state-history-length", type=int, default=1)
     parser.add_argument("--network", default="enp4s0")
     parser.add_argument("--stats", default=str(DEFAULT_STATS))

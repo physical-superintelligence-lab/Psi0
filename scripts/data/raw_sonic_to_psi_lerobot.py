@@ -21,15 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.offline.dex1_1_layout import (
-    MOTION_TOKEN_DIM,
-    PSI_ACTION_DIM,
-    PSI_STATE_DIM,
-    SOURCE_VECTOR_DIM,
-    pack_psi_action,
-    pack_psi_state,
-)
-from scripts.offline.sonic_schema import detect_end_effector, info_feature_width, read_json_if_exists
+SOURCE_VECTOR_DIM = 43
+MOTION_TOKEN_DIM = 64
+PSI_STATE_DIM = 43
+PSI_ACTION_DIM = 78
+QPOS_SLICES = ((0, 15), (15, 22), (29, 36))
+HAND_SLICES = ((22, 29), (36, 43))
+SOURCE_TO_ACTUATED_HAND7 = (4, 5, 6, 0, 1, 2, 3)
+ACTUATED_TO_SOURCE_HAND7 = (3, 4, 5, 6, 0, 1, 2)
 
 CODE_VERSION = "v2.1"
 FPS = 30
@@ -48,15 +47,6 @@ SRC_ACTION_WBC = "action.wbc"              # 43, same layout as state
 SRC_MOTION_TOKEN = "action.motion_token"   # 64
 SRC_TELEOP_LEFT_HAND = "teleop.left_hand_joints"   # 7, actuated order
 SRC_TELEOP_RIGHT_HAND = "teleop.right_hand_joints"  # 7, actuated order
-
-END_EFFECTOR_TO_HAND_LAYOUT = {
-    "dex3": "full",
-    "dex1_1": "dex1-1",
-    # Dex1 hardware represented as a dense, reversible virtual Dex3 hand14.
-    # This keeps all hand dimensions meaningful for Psi0's uniform action loss.
-    "dex1_virtual14": "full",
-}
-
 
 @dataclass
 class InfoDict:
@@ -95,58 +85,24 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def _find_modality_entry(modality: Dict[str, Any], key: str) -> Dict[str, Any] | None:
-    for section in modality.values():
-        if not isinstance(section, dict):
-            continue
-        for entry in section.values():
-            if isinstance(entry, dict) and entry.get("original_key") == key:
-                return entry
-    return None
+def take_slices(values: np.ndarray, slices: tuple[tuple[int, int], ...]) -> np.ndarray:
+    return np.concatenate([values[start:end] for start, end in slices])
 
 
-def _entry_width(entry: Dict[str, Any]) -> int | None:
-    start = entry.get("start")
-    end = entry.get("end")
-    if isinstance(start, int) and isinstance(end, int):
-        return end - start
-    return None
+def source_full_hand14(source43: np.ndarray) -> np.ndarray:
+    source_hands = take_slices(source43, HAND_SLICES).reshape(2, 7)
+    return source_hands[:, list(SOURCE_TO_ACTUATED_HAND7)].reshape(14)
 
 
-def validate_source_modality(data_root: Path) -> Dict[str, Any]:
-    modality_path = data_root / "meta" / "modality.json"
-    if not modality_path.is_file():
-        raise FileNotFoundError(f"missing source modality.json: {modality_path}")
-    modality = json.loads(modality_path.read_text())
-    info = read_json_if_exists(data_root / "meta" / "info.json")
+def source_hand7_from_actuated(hand7: np.ndarray) -> np.ndarray:
+    hand = np.asarray(hand7, dtype=np.float32)
+    if hand.shape != (7,):
+        raise ValueError(f"hand7 must have shape (7,), got {hand.shape}")
+    return hand[list(ACTUATED_TO_SOURCE_HAND7)]
 
-    required = {
-        SRC_STATE: SOURCE_VECTOR_DIM,
-        SRC_ACTION_WBC: SOURCE_VECTOR_DIM,
-        SRC_MOTION_TOKEN: MOTION_TOKEN_DIM,
-    }
-    missing = []
-    wrong_width = []
-    for key, expected_width in required.items():
-        entry = _find_modality_entry(modality, key)
-        if entry is None:
-            width = info_feature_width(info, key)
-            if width is None:
-                missing.append(key)
-            elif width != expected_width:
-                wrong_width.append(f"{key} width {width}, expected {expected_width}")
-            continue
-        width = _entry_width(entry)
-        if width is not None and width != expected_width:
-            wrong_width.append(f"{key} width {width}, expected {expected_width}")
-    if missing or wrong_width:
-        details = []
-        if missing:
-            details.append(f"missing source feature metadata: {', '.join(missing)}")
-        if wrong_width:
-            details.append("; ".join(wrong_width))
-        raise ValueError(f"invalid source modality.json: {'; '.join(details)}")
-    return modality
+
+def pack_psi_state(source43: np.ndarray) -> np.ndarray:
+    return np.concatenate([take_slices(source43, QPOS_SLICES), source_full_hand14(source43)])
 
 
 class Sonic2LeRobotConverter:
@@ -177,12 +133,11 @@ class Sonic2LeRobotConverter:
         self.lengths_by_episode: Dict[int, int] = {}
         self.chunks_size: int = 1000
         self.end_effector: str = "dex3"
-        self.hand_layout: str = END_EFFECTOR_TO_HAND_LAYOUT[self.end_effector]
         self.num_episodes: int = 0
         self.total_frames: int = 0
 
     def build_obs(self, state43: np.ndarray) -> Dict[str, Any]:
-        states = pack_psi_state(state43, hand_layout=self.hand_layout)
+        states = pack_psi_state(state43)
         return {"states": states.astype(np.float32).tolist()}  # 29 + 14 = 43
 
     def build_act(
@@ -200,7 +155,7 @@ class Sonic2LeRobotConverter:
             if hand.shape != (14,) or not np.all(np.isfinite(hand)):
                 raise ValueError(f"hand14_override must be finite (14,), got {hand.shape}")
             return np.concatenate([token, hand]).astype(np.float32).tolist()
-        action = pack_psi_action(token64, wbc43, hand_layout=self.hand_layout)
+        action = np.concatenate([token64, source_full_hand14(wbc43)])
         return action.astype(np.float32).tolist()  # 64 + 14 = 78
 
     def make_one_episode(
@@ -315,14 +270,10 @@ class Sonic2LeRobotConverter:
         num_workers: int,
         robot_type: str,
         end_effector: str,
-        max_episodes: int | None = None,
     ):
         self.chunks_size = chunks_size
-        modality = validate_source_modality(data_root)
-        resolved_end_effector = detect_end_effector(data_root, modality) if end_effector == "auto" else end_effector
-        self.end_effector = resolved_end_effector
-        self.hand_layout = END_EFFECTOR_TO_HAND_LAYOUT[resolved_end_effector]
-        print(f"Using end_effector={self.end_effector}, hand_layout={self.hand_layout}")
+        self.end_effector = end_effector
+        print(f"Using end_effector={self.end_effector}")
         data_dir = work_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -338,12 +289,7 @@ class Sonic2LeRobotConverter:
 
         self.episode_sources = []
         out_ep = 0
-        episode_parquets = sorted((data_root / "data").rglob("episode_*.parquet"))
-        if max_episodes is not None:
-            episode_parquets = episode_parquets[:max_episodes]
-            print(f"Limiting conversion to first {len(episode_parquets)} episode(s).")
-
-        for pq in episode_parquets:
+        for pq in sorted((data_root / "data").rglob("episode_*.parquet")):
             src_ep = int(pq.stem.split("_")[1])
             desc = ep_task.get(src_ep, "")
             task_idx = task_to_idx.get(desc, 0)
@@ -461,30 +407,15 @@ def main():
     parser.add_argument("--num-workers", type=int, default=os.cpu_count(), help="Max parallel workers")
     parser.add_argument("--robot-type", type=str, choices=["g1"], default="g1")
     parser.add_argument(
-        "--max-episodes",
-        type=int,
-        default=None,
-        help="Convert only the first N source episodes. Useful for real-data smoke tests.",
-    )
-    parser.add_argument(
         "--end-effector",
-        choices=["auto", "dex3", "dex1_1", "dex1_virtual14"],
-        default="auto",
+        choices=["dex3", "dex1_virtual14"],
+        default="dex3",
         help=(
             "Source end-effector. dex1_virtual14 preserves the dense virtual Dex3 "
             "hand representation produced by the Psi0 SONIC Dex1 wrapper."
         ),
     )
-    parser.add_argument(
-        "--hand-layout",
-        choices=["dex1-1", "full"],
-        default=None,
-        help="Deprecated compatibility override. Prefer --end-effector dex3|dex1_1.",
-    )
     args = parser.parse_args()
-    if args.max_episodes is not None and args.max_episodes <= 0:
-        raise ValueError("--max-episodes must be a positive integer")
-
     data_root = Path(args.data_root).expanduser().resolve()
     work_dir = Path(args.work_dir).expanduser().resolve()
     if args.repo_id:
@@ -493,8 +424,6 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
 
     pipeline = Sonic2LeRobotConverter()
-    if args.hand_layout is not None:
-        args.end_effector = "dex1_1" if args.hand_layout == "dex1-1" else "dex3"
     pipeline.run(
         data_root,
         work_dir,
@@ -502,7 +431,6 @@ def main():
         args.num_workers,
         args.robot_type,
         args.end_effector,
-        args.max_episodes,
     )
     pipeline.write_meta(work_dir)
 

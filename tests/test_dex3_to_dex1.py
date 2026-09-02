@@ -3,7 +3,6 @@ import unittest
 
 import numpy as np
 
-from scripts.offline.dex1_1_layout import Dex11Command
 from scripts.offline.dex3_to_dex1 import build_from_stats, Dex3ToDex1
 
 
@@ -73,20 +72,6 @@ class TestInverse(unittest.TestCase):
         self.assertEqual(s.shape, (14,))
         self.assertAlmostEqual(self.m.left.openness(s[:7]), 1.0, places=4)
         self.assertAlmostEqual(self.m.right.openness(s[7:]), 0.0, places=4)
-
-
-class TestToCommand(unittest.TestCase):
-    def test_from_action36(self):
-        amin, amax = _stats()
-        m = build_from_stats(amin, amax, range_threshold=0.3)
-        action = np.zeros(36, np.float32)
-        action[0:7] = amax[0:7]     # 左手全开位
-        action[7:14] = amin[7:14]   # 右手全闭位
-        cmd = m.to_command(action)
-        self.assertIsInstance(cmd, Dex11Command)
-        self.assertAlmostEqual(cmd.left, 1.0, places=5)
-        self.assertAlmostEqual(cmd.right, 0.0, places=5)
-
 
 if __name__ == "__main__":
     unittest.main()
