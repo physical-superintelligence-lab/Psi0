@@ -4,6 +4,43 @@ if TYPE_CHECKING:
     from psi.config.data_lerobot import LerobotDataConfig
     # from psi.config.data_simple import SimpleDataConfig
 
+import logging
+
+class _SuppressV21Warning(logging.Filter):
+    """Drop lerobot's "your dataset is in v2.0 format" nag.
+
+    Our datasets are deliberately v2.0 (global stats): nothing here reads
+    meta/episodes_stats.jsonl, so converting them buys nothing and the message
+    is pure noise on every dataset open. Match on the convert command, which is
+    unique to that message and -- unlike the version string -- does not move
+    when lerobot bumps its codebase version.
+    """
+
+    def filter(self, record):
+        return "convert_dataset_v20_to_v21" not in record.getMessage()
+
+
+_v21_filter = _SuppressV21Warning()
+# lerobot emits it with a bare logging.warning(), i.e. through the root logger,
+# so the root filter is what actually catches it. Handler-level filters are the
+# fallback for records that reach root by propagation from a child logger --
+# ancestor *logger* filters never run on those.
+logging.getLogger().addFilter(_v21_filter)
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_v21_filter)
+
+import warnings
+# lerobot's pyav decode path goes through torchvision.io.VideoReader, which emits a
+# UserWarning on every frame decode about torchvision video io being deprecated in favour
+# of torchcodec. We deliberately use the torchvision/pyav backend (torchcodec's shared libs
+# are absent in this venv -- see LeRobotDatasetWrapper below), so silence that one warning.
+# Registered at import time so it is inherited by forked DataLoader workers.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*video decoding and encoding capabilities of torchvision are deprecated.*",
+    category=UserWarning,
+)
+
 import torch
 from psi.data.lerobot.compat import (
     LeRobotDataset,
@@ -41,6 +78,11 @@ class LeRobotDatasetWrapper(torch.utils.data.Dataset):
             root=root_dir,
             delta_timestamps=delta_timestamps, # type: ignore
             image_transforms=None,
+            # torchcodec IMPORTS in this venv (so lerobot's get_safe_default_codec
+            # selects it) but dies loading libtorchcodec at first decode -- the
+            # FFmpeg shared libs are absent. The sharded loader already defaults
+            # to pyav for the same reason (lerobot_sharded.py); mirror it here.
+            video_backend="pyav",
         )
         self._cache = {}
 

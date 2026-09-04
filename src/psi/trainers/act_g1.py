@@ -93,19 +93,27 @@ class ActG1Trainer(Trainer):
     def create_dataloaders(self, train_dataset, val_dataset):
         g = torch.Generator()
         g.manual_seed(self.cfg.seed or 42)
+
+        cfg_num_workers = getattr(self.data_cfg, "num_workers", None)
+        num_workers = cfg_num_workers if cfg_num_workers is not None else 12
+        is_psix_mixture_dataset_enabled = hasattr(self.data_cfg, "mixture_spec") and self.data_cfg.mixture_spec is not None
+
         train_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": num_workers,
             "drop_last": True,
-            "shuffle": True,
-            "generator": g,
-            "worker_init_fn": lambda worker_id: seed_everything(
-                self.cfg.seed + worker_id
-            ),
             "persistent_workers": True,
+            "pin_memory": True,
+            "prefetch_factor": 2,
         }
+        if not is_psix_mixture_dataset_enabled:
+            train_dataloader_kwargs["shuffle"] = True
+            train_dataloader_kwargs["generator"] = g
+            train_dataloader_kwargs["worker_init_fn"] = lambda worker_id: seed_everything(
+                self.cfg.seed + worker_id
+            )
 
         val_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": 4,
             "drop_last": False,
             "pin_memory": True,
             "persistent_workers": True,

@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Callable, Optional
 import importlib.resources as resources
 import zipfile
-# if TYPE_CHECKING:
+if TYPE_CHECKING:
+    from psi.data.gear.schema.lerobot import StateActionMetadata
 import numpy as np
 import torch
 from PIL import Image
@@ -291,11 +292,20 @@ def count_parameters(model, trainable: bool = False):
     # print(f"Total parameters: {total_params:,}")
     # print(f"Trainable parameters: {trainable_params:,}")
 
-def str_to_tensor(s: str):
-    return torch.tensor(list(s.encode('utf-8')), dtype=torch.uint8)
+def str_to_tensor(s: str, max_length: int | None = None, pad_value: int = 0) -> torch.Tensor:
+    data = list(s.encode("utf-8"))
+    if max_length is not None:
+        data = data[:max_length]
+        if len(data) < max_length:
+            data = data + [pad_value] * (max_length - len(data))
+    return torch.tensor(data, dtype=torch.uint8)
 
-def tensor_to_str(t):
-    return bytes(t.tolist()).decode('utf-8')
+def tensor_to_str(t: torch.Tensor, strip_trailing_pad: bool = True, pad_value: int = 0) -> str:
+    values = t.tolist()
+    if strip_trailing_pad:
+        while len(values) > 0 and values[-1] == pad_value:
+            values.pop()
+    return bytes(values).decode("utf-8")
 
 def string_compatible_collate(batch):
     
@@ -337,14 +347,29 @@ def batch_str_to_tensor(batch: T) -> T:
 # wrote for pytests
 def extract_args_from_shell_script(script_path):
     """Extract arguments from a shell script that uses accelerate launch"""
-    
+
     with open(script_path, 'r') as f:
         content = f.read()
-    
-    # Extract from args variable if it exists
-    args_match = re.search(r'args="([^"]+)"', content, re.DOTALL)
+
+    # Extract from args variable if it exists; anchor the closing quote to its own
+    # line so inner quotes (e.g. $(date +"%y%m%d%H%M")) don't truncate the block.
+    args_match = re.search(r'args="(.*?)\n"', content, re.DOTALL) or \
+        re.search(r'args="([^"]+)"', content, re.DOTALL)
     if args_match:
         args_content = args_match.group(1)
+        # poor-man's shell expansion so tokens stay whitespace-splittable:
+        # $(date +FMT) via strftime, then ${VAR:-default} from env or default
+        from datetime import datetime
+        args_content = re.sub(
+            r'\$\(date \+"?([^")]+)"?\)',
+            lambda m: datetime.now().strftime(m.group(1)),
+            args_content,
+        )
+        args_content = re.sub(
+            r'\$\{(\w+):-([^}]*)\}',
+            lambda m: os.environ.get(m.group(1)) or m.group(2),
+            args_content,
+        )
         # Split by backslash and newline, clean up
         args_list = [
             arg.strip().rstrip('\\').strip()
@@ -419,7 +444,7 @@ def make_image_grid(images, nrows=None, ncols=None):
     else:
         ncols = int(np.ceil(num_images / nrows))
     
-    H, W = images[0].size
+    W,H   = images[0].size
     grid = Image.new("RGB", size=(ncols * W, nrows * H))
 
     for i, image in enumerate(images):
@@ -455,6 +480,16 @@ def pad_to_len(x, target_len, dim=1, pad_value=0.0):
     mask[tuple(idx)] = False
     return padded, mask
 
+def split_by_modality(data, modality_metadata: dict[str, StateActionMetadata]):
+    # split data dimmension according to modality metadata, return dict of modality to data
+    result = {}
+    start = 0
+    for mod, meta in modality_metadata.items():
+        end = start + meta.shape[0]
+        result[mod] = data[..., start:end]
+        start = end
+    return result
+
 def dreamzero_instantiate(config, *args, **kwargs):
     from hydra.utils import instantiate
     from omegaconf import DictConfig, OmegaConf
@@ -473,3 +508,20 @@ def dreamzero_instantiate(config, *args, **kwargs):
 
     _patch(config)
     return instantiate(config, *args, **kwargs)
+
+
+def cfg_json_default(o):
+    """json.dump default handler for pydantic config objects containing torch/numpy types."""
+    from enum import Enum
+    if isinstance(o, torch.dtype):
+        return str(o)
+    if isinstance(o, Enum):
+        return o.value
+    if isinstance(o, (torch.Tensor, np.ndarray)):
+        return o.tolist()
+    if isinstance(o, np.dtype):
+        return str(o)
+    if isinstance(o, (np.integer, np.floating)):
+        return o.item()
+    return repr(o)
+

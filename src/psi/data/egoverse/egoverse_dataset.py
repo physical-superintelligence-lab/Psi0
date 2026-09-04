@@ -59,7 +59,7 @@ class SQLLocalEpisodeResolver(LocalEpisodeResolver):
         print(f"local folders: {len(local_hashes)}")
 
         # --- 2. Load or build bimanual-only SQL cache ---
-        _psi_home = os.environ.get("PSI_HOME")
+        _psi_home = os.environ.get("PSI_HOME", "/psi")
         _SQL_CACHE = (
             Path(_psi_home) / "cache/egoverse/bimanual_episodes.parquet"
             if _psi_home

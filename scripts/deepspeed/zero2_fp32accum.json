@@ -10,13 +10,16 @@
     "bf16": {
         "enabled": "auto"
     },
+    "data_types": {
+        "grad_accum_dtype": "fp32"
+    },
     "train_micro_batch_size_per_gpu": "auto",
     "train_batch_size": "auto",
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": 1.0,
     "zero_optimization": {
         "stage": 2,
-        "overlap_comm": true,
+        "overlap_comm": false,
         "contiguous_gradients": true,
         "sub_group_size": 1e9,
         "reduce_bucket_size": "auto"

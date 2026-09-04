@@ -28,6 +28,12 @@ LOG_CONFIG = {
         }
     },
     "root": {"level": "INFO", "handlers": ["console"]},
+    # "loggers": {
+    #     "psi.data.gear.dataset.lerobot": {"level": "DEBUG", "propagate": True},
+    #     "psi.data.gear.dataset.lerobot_sharded": {"level": "DEBUG", "propagate": True},
+    #     "psi.data.gear.dataset.mixin": {"level": "DEBUG", "propagate": True},
+    #     "psi.data.dataset": {"level": "DEBUG", "propagate": True},
+    # }
 }
 logging.config.dictConfig(LOG_CONFIG)
 

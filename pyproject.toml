@@ -24,10 +24,11 @@ dependencies = [
     "typer>=0.19.1",
     "tyro==0.9.32",
     "vuer[all]>=0.0.68",
-    "wandb>=0.20.0",
+    "wandb[media]>=0.20.0",
     "simplejpeg>=1.9.0",
     "dotenv",
     "gdown>=5.2.0",
+    "decord2",
 ]
 
 [build-system]
@@ -52,10 +53,10 @@ serve = [
 ]
 
 viz = [
-    "matplotlib",
     "transforms3d>=0.4.2",
     "vuer[all]>=0.0.68",
     "viser>=1.0.15",
+    "matplotlib",
     #"pin>=3.8.0",
     #"numpy<2.0.0",
 ]
@@ -130,7 +131,17 @@ egoverse = [
 ]
 
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
+flash-attn = ["wheel", { requirement = "torch", match-runtime = true }]
 
 [project.scripts]
-serve_psi0 = "psi.deploy.psi0_serve_simple:main"
+serve_psi0_simple = "psi.deploy.serve_psi0_simple:main"
+serve_psi0_simple_multi = "psi.deploy.serve_psi0_simple_multi:main"
+serve_psi0_amo = "psi.deploy.serve_psi0_amo:main"
+serve_psi0_sonic = "psi.deploy.serve_psi0_sonic:main"
+serve_psi0_sonic_http = "psi.deploy.serve_psi0_sonic_http:main"
+serve_psi0_sonic_subgoal = "psi.deploy.serve_psi0_sonic_subgoal:main"
+serve_psi0_dexmate = "psi.deploy.serve_psi0_dexmate:main"
+download_ckpt = "psi.deploy.download_ckpt:main"
+upload_ckpt_hf = "psi.deploy.upload_ckpt_hf:main"
+upload_ckpt_ms = "psi.deploy.upload_ckpt_ms:main"
+download_ckpt_ms = "psi.deploy.download_ckpt_ms:main"

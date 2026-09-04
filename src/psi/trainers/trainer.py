@@ -28,12 +28,34 @@ import shutil
 from psi.utils import initialize_overwatch
 overwatch = initialize_overwatch(__name__)
 
+
+def should_save_training_checkpoint(
+    completed_step: int, checkpointing_steps: int, max_training_steps: int
+) -> bool:
+    """Save on the normal cadence and always at the end of training."""
+
+    if completed_step <= 0 or checkpointing_steps <= 0 or max_training_steps <= 0:
+        raise ValueError("checkpoint step values must be positive")
+    return (
+        completed_step % checkpointing_steps == 0
+        or completed_step == max_training_steps
+    )
+
 def worker_init_fn(worker_id):
-    # print(f"worker_init_fn called by worker {worker_id}")
     worker_seed = torch.initial_seed() % 2**32
     random.seed(worker_seed)
     np.random.seed(worker_seed)
     torch.manual_seed(worker_seed)
+    # Cap intra-op threads per worker to avoid CPU oversubscription across ranks/workers.
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    try:
+        import cv2
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
 
 class Trainer(ABC):
     cfg: LaunchConfig
@@ -142,7 +164,9 @@ class Trainer(ABC):
 
     def log(
         self, metrics: dict[str, Any], start_time: Optional[float] = None
-    ) -> None: 
+    ) -> None:
+        if not self.accelerator.is_main_process:
+            return
         wandb_dict = copy(metrics)
         for k,v in list(wandb_dict.items()):
             if isinstance(v, torch.Tensor) or isinstance(v, np.ndarray):
@@ -220,7 +244,14 @@ class Trainer(ABC):
         """Returns the length of the training dataset."""
         if hasattr(self, "_len_train_dataset") and self._len_train_dataset: # type: ignore
             return self._len_train_dataset # type: ignore
-        return len(self.train_dataset) # type: ignore
+        
+        # HACK for ShardedLeRobotMixtureDataset
+        if (hasattr(self.train_dataset, "raw_dataset") and 
+            hasattr(self.train_dataset.raw_dataset, "datasets")
+        ):
+            return sum(sum(ds.shard_lengths) for ds in self.train_dataset.raw_dataset.datasets)
+
+        return self.train_dataset.dataset_length if hasattr(self.train_dataset, "dataset_length") else len(self.train_dataset)  # type: ignore
 
     @len_train_dataset.setter
     def len_train_dataset(self, length: int):
@@ -228,10 +259,15 @@ class Trainer(ABC):
 
     @property
     def len_val_dataset(self) -> int:
-        """Returns the length of the training dataset."""
-        if hasattr(self, "_len_train_dataset") and self._len_val_dataset: # type: ignore
+        """Returns the length of the validation dataset."""
+        if hasattr(self, "_len_val_dataset") and self._len_val_dataset: # type: ignore
             return self._len_val_dataset # type: ignore
-        return len(self.val_dataset) # type: ignore
+        # HACK for ShardedLeRobotMixtureDataset
+        if (hasattr(self.val_dataset, "raw_dataset") and 
+            hasattr(self.val_dataset.raw_dataset, "datasets")
+        ):
+            return sum(sum(ds.shard_lengths) for ds in self.val_dataset.raw_dataset.datasets)
+        return self.val_dataset.dataset_length if hasattr(self.val_dataset, "dataset_length") else len(self.val_dataset)  # type: ignore
     
     @len_val_dataset.setter
     def len_val_dataset(self, length: int):
@@ -413,8 +449,9 @@ class Trainer(ABC):
                 # Remove older checkpoints if exceeding max_to_keep
                 for old_ckpt in ckpt_dirs_sorted[max_to_keep:]:
                     old_ckpt_path = os.path.join(save_dir, old_ckpt)
-                    if "0000" in old_ckpt:
-                        # force keeping ckpt saved every 10k
+                    preserve_every = self.train_cfg.preserve_checkpoint_every
+                    if preserve_every and extract_step(old_ckpt) % preserve_every == 0:
+                        # Legacy default: force keeping ckpts saved every 10k.
                         continue
                     try:
                         shutil.rmtree(old_ckpt_path)
@@ -435,16 +472,26 @@ class Trainer(ABC):
         if self.cfg.train.resume_from_checkpoint is None:
             return 0, None
 
-        if "ckpt_" in self.cfg.train.resume_from_checkpoint:
-            path = os.path.basename(self.cfg.train.resume_from_checkpoint)
+        resume_root = os.path.normpath(self.cfg.train.resume_from_checkpoint)
+        if os.path.basename(resume_root).startswith("ckpt_"):
+            path = os.path.basename(resume_root)
+            load_path = resume_root
         else:
-            if os.path.exists(f"{self.cfg.train.resume_from_checkpoint}/checkpoints"):
+            checkpoints_dir = os.path.join(resume_root, "checkpoints")
+            if os.path.exists(checkpoints_dir):
                 # Get the most recent checkpoint
-                dirs = os.listdir(f"{self.cfg.train.resume_from_checkpoint}/checkpoints")
+                dirs = [
+                    d for d in os.listdir(checkpoints_dir)
+                    if d.startswith("ckpt_")
+                    and d.removeprefix("ckpt_").isdigit()
+                    and os.path.isdir(os.path.join(checkpoints_dir, d))
+                ]
                 dirs = sorted(dirs, key=lambda x: int(x.split("_")[1]))
                 path = dirs[-1] if len(dirs) > 0 else None
+                load_path = os.path.join(checkpoints_dir, path) if path is not None else None
             else:
                 path = None
+                load_path = None
 
         if path is None:
             overwatch.critical(
@@ -454,10 +501,13 @@ class Trainer(ABC):
             initial_global_step = 0
             load_path = None
         else:
-            load_path = os.path.join(self.cfg.train.resume_from_checkpoint, "checkpoints", path)
+            assert load_path is not None
             overwatch.info(f"Resuming from checkpoint {load_path}")
             self.accelerator.load_state(load_path)
-            initial_global_step = int(path.split("_")[1]) + 1 # prevent from saving to the same checkpoint again
+            # ckpt_N is written immediately after completing optimizer update N.
+            # The next loop iteration must therefore use zero-based global_step N;
+            # adding one here silently skipped an optimizer update.
+            initial_global_step = int(path.split("_")[1])
 
         return initial_global_step, load_path
 

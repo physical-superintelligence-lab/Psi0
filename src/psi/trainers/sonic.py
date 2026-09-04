@@ -37,8 +37,16 @@ from psi.utils import flatten, shorten, move_to_device, rmse, seed_everything
 from psi.models.psi0 import Psi0Model
 
 class SonicTrainer(Trainer):
+    """.. deprecated:: Use PsixFinetuneTrainer instead."""
 
     def __init__(self, cfg, device: torch.device):
+        import warnings
+        warnings.warn(
+            "SonicTrainer is deprecated and will be removed in a future version. "
+            "Use PsixFinetuneTrainer instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(cfg, device)
 
         self.noise_scheduler_name = self.model_cfg.noise_scheduler
@@ -90,13 +98,18 @@ class SonicTrainer(Trainer):
         return self.cfg.model # type: ignore
     
     def init_qwen3vl_models(self):
-        vlm_model = Qwen3VLForConditionalGeneration.from_pretrained(
-            self.model_cfg.model_name_or_path,
-            attn_implementation="flash_attention_2",
-            dtype=torch.bfloat16
-        )
+        from huggingface_hub.errors import HFValidationError
+        try:
+            vlm_model = Qwen3VLForConditionalGeneration.from_pretrained(
+                self.model_cfg.model_name_or_path,
+                attn_implementation="flash_attention_2",
+                dtype=torch.bfloat16
+            )
+        except HFValidationError as e:
+            overwatch.error(f"Failed to load pretrained VLM model from {self.model_cfg.model_name_or_path}")
+            raise e
+        
         overwatch.info(f"Load pretrained VLM model from {self.model_cfg.model_name_or_path}")
-
         self.vlm_processor = AutoProcessor.from_pretrained(self.model_cfg.model_name_or_path)
         self.tokenizer = self.vlm_processor.tokenizer
 
@@ -227,28 +240,35 @@ class SonicTrainer(Trainer):
         transform_kwargs=dict(
             vlm_processor=self.vlm_processor,
         )
+        val_data_cfg = self.data_cfg.model_copy(deep=True)
         self.train_dataset = self.data_cfg(split="train", transform_kwargs=transform_kwargs)
-        self.val_dataset = self.data_cfg(split="val", transform_kwargs=transform_kwargs)
+        self.val_dataset = val_data_cfg(split="val", transform_kwargs=transform_kwargs)
         return self.train_dataset, self.val_dataset
 
     def create_dataloaders(self, train_dataset, val_dataset):
-        g = torch.Generator()
-        g.manual_seed(self.cfg.seed or 42)
+        cfg_num_workers = getattr(self.data_cfg, "num_workers", None)
+        num_workers = cfg_num_workers if cfg_num_workers is not None else 12
+        is_psix_mixture_dataset_enabled = hasattr(self.data_cfg, "mixture_spec") and self.data_cfg.mixture_spec is not None
+
         train_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": num_workers,
             "drop_last": True,
-            "shuffle": True,
-            "generator": g,
-            "worker_init_fn": worker_init_fn,
-            "persistent_workers": True,  # prefetch_factor=4
+            "persistent_workers": True,
+            "pin_memory": True,
+            "prefetch_factor": 2,
         }
+        if not is_psix_mixture_dataset_enabled:
+            g = torch.Generator()
+            g.manual_seed(self.cfg.seed or 42)
+            train_dataloader_kwargs["shuffle"] = True
+            train_dataloader_kwargs["generator"] = g
+            train_dataloader_kwargs["worker_init_fn"] = worker_init_fn
 
         val_dataloader_kwargs = {
-            "num_workers": 12,
+            "num_workers": 4,
             "drop_last": False,
             # "pin_memory": True,
             "persistent_workers": True,
-            "shuffle": True,
         }  # 1 small enough to fit im Mem. 2. no need distributed sampler
 
         collator = PaddedCollatorForTogether(
@@ -264,6 +284,11 @@ class SonicTrainer(Trainer):
             collate_fn=collator,
             **train_dataloader_kwargs,
         )
+
+        overwatch.info(f"Dataloader kwargs:")
+        for k, v in train_dataloader_kwargs.items():
+            overwatch.info(f"{k}: {v}", ctx_level=1)
+
         self.val_dataloader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=self.task_cfg.val_batch_size,
@@ -344,9 +369,7 @@ class SonicTrainer(Trainer):
                     # NOTE: It is normal that param.grad is None for deepspeed and fsdp
                     for name, param in self.model.named_parameters():
                         if param.requires_grad and param.grad is None:
-                            overwatch.critical(f"[Unused] {name} did not receive a gradient.")
-            else:
-                self._grad_norm_act = 0.0
+                            overwatch.critical(f"[Unused] {name} did not receive a gradient.")  
 
             self.optimizer.step()
             self.lr_scheduler.step()
@@ -356,11 +379,11 @@ class SonicTrainer(Trainer):
         if (
             hasattr(self, "global_step")
             and self.global_step % self.cfg.log.log_freq == 0
-            and "raw_images" in batch
+            and "observations" in batch
             and self.accelerator.is_main_process
             and self.cfg.log.report_to == "wandb"
         ):
-            raw_imgs = batch["raw_images"]
+            raw_imgs = batch["observations"]
             # Support both torch.Tensor and numpy
             if isinstance(raw_imgs, torch.Tensor):
                 raw_imgs = raw_imgs.detach().cpu().numpy()
@@ -372,7 +395,7 @@ class SonicTrainer(Trainer):
 
             # Images are assumed to have same shape and 3 channels; concat directly
             concat_img = np.concatenate(img_arrays, axis=1)
-            wandb.log({"raw_images": [wandb.Image(concat_img, caption=f"raw images {self.global_step}")]}, step=self.global_step)
+            wandb.log({"observations": [wandb.Image(concat_img, caption=f"raw images {self.global_step}")]}, step=self.global_step)
 
         # step_loss = self.accelerator.gather(losses["loss"].detach()).mean().item() # type:ignore
         # self.train_loss_tracker = step_loss
@@ -428,14 +451,15 @@ class SonicTrainer(Trainer):
         return super().save_checkpoint(global_step)
 
     def evaluate(self) -> dict[str, float] | None:
+        assert self.val_dataloader is not None, "No validation dataloader available for evaluation."
         accelerator = self.accelerator
         global_step = self.global_step
         eval_model = self.unwrap_model()
 
         total_val_batches = (
-            len(self.val_dataloader)
+            self.len_val_dataloader
             if self.task_cfg.val_num_batches == -1
-            else min(self.task_cfg.val_num_batches, len(self.val_dataloader))
+            else min(self.task_cfg.val_num_batches, self.len_val_dataloader)
         )
         val_progress_bar = tqdm(
             self.val_dataloader,
@@ -448,6 +472,7 @@ class SonicTrainer(Trainer):
 
         val_loss_list = []
         action_l1_err_list = []
+        dataset_name_list = []
 
         for val_step, val_batch in enumerate(val_progress_bar):
             val_batch = batch_str_to_tensor(val_batch)
@@ -462,20 +487,15 @@ class SonicTrainer(Trainer):
             # validation loss
             with accelerator.autocast():
                 val_loss = self.forward_and_loss(eval_model, val_batch)
-                val_loss_list.append(accelerator.gather(val_loss["loss"]))
+                val_loss_list.append(val_loss["loss"].detach())
 
                 # action prediction loss
                 pred_actions = self.inference(eval_model, val_batch)
-                err_action_l1 = pred_actions - gt_actions  # (B, Tp, Da)
-
-                err_action_l1_all = accelerator.gather(
-                    err_action_l1[:, :Tp].contiguous()
-                )
-                err_action_masks_all = accelerator.gather(mask[:, :Tp].contiguous())
-                err_action_l1 = err_action_l1_all[
-                    err_action_masks_all.to(torch.bool) # type: ignore
-                ].abs()
-                action_l1_err_list.append(err_action_l1.reshape(-1, Da).float().cpu().numpy())  # (B*world_size*Ta, 7)
+                err_action_l1 = (pred_actions - gt_actions[:, :Tp]).abs()  # (B, Tp, Da)
+                action_l1_err_list.append(err_action_l1.reshape(-1, Da).float())
+                if "dataset_name" in val_batch:
+                    names = val_batch["dataset_name"] if isinstance(val_batch["dataset_name"], list) else [val_batch["dataset_name"]]
+                    dataset_name_list.extend(n for n in names for _ in range(Tp))
 
             if val_step + 1 >= total_val_batches:
                 if accelerator.is_local_main_process:
@@ -483,31 +503,39 @@ class SonicTrainer(Trainer):
                 self.val_dataloader.end() # type: ignore
                 break
 
-        avg_val_loss = torch.cat(val_loss_list).mean().item()
-        action_l1_err_list = np.concatenate(action_l1_err_list, axis=0)  # (len_val_dataset*Ta, Da)
+        # Reduce scalars across ranks after all ranks have exited the loop.
+        avg_val_loss = accelerator.reduce(
+            torch.stack(val_loss_list).mean(), reduction="mean"
+        ).item()
+
+        # Gather action L1 errors and dataset names across all ranks.
+        local_action_l1 = torch.cat(action_l1_err_list, dim=0)  # (N_local*Tp, Da)
+        all_action_l1 = accelerator.gather(local_action_l1)  # (N_all*Tp, Da)
+
+        if accelerator.num_processes > 1:
+            import torch.distributed as dist
+            all_names_per_rank: list[list[str]] = [[] for _ in range(accelerator.num_processes)]
+            dist.all_gather_object(all_names_per_rank, dataset_name_list)
+            all_dataset_names = [n for rank_names in all_names_per_rank for n in rank_names]
+        else:
+            all_dataset_names = dataset_name_list
+
+        action_l1_err_arr = all_action_l1.cpu().numpy()  # (N_all*Tp, Da)
         action_l1_err_list_denormed = (
-            self.maxmin.denormalize_L1_action_err( # type: ignore FIXME
-                action_l1_err_list
+            self.maxmin.denormalize_L1_action_err( # type: ignore
+                action_l1_err_arr,
+                dataset_name=all_dataset_names or None,
             )
         )
 
-        # action L1 errors
-        avg_action_errors_denormed = action_l1_err_list_denormed.mean(0)  # (Da,) NOTE only if the error is L1 (linear)
-        
-        # Define dimension splits: hand_joints(14) + arm_joints(14) + rpy(3) + height(1) = 32
-        labels_denormed = [
-            "latent_action",
-            "hand_joints"
-        ]
-    
-        avg_lr_action_err_denormed = np.split(
-            avg_action_errors_denormed, [64,], axis=-1
-        )
+        modality_metrics: dict[str, float] = {}
+        for ds, modalities in action_l1_err_list_denormed.items():
+            for mod_key, mod_l1 in modalities.items():
+                modality_metrics[f"{ds}/{mod_key}"] = mod_l1.mean(0)
 
-        # log metrics
         return {
             "loss": avg_val_loss,
-            **dict(zip(labels_denormed, map(np.linalg.norm, avg_lr_action_err_denormed)))
+            **modality_metrics,
         }
 
     def forward_and_loss(self, model, batch) -> dict[str, torch.Tensor]:
@@ -558,10 +586,10 @@ class SonicTrainer(Trainer):
             raise ValueError
 
         model_output = model(
-            input_ids=batch["input_ids"],#####
+            input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"], # vlm related
             pixel_values=batch["pixel_values"],
-            image_grid_thw=batch["image_grid_thw"], ####
+            image_grid_thw=batch["image_grid_thw"],
             action_samples=noisy_actions,  # (B,Tp,Da)
             states=batch["states"],  # (B,1,M)
             timestep=timesteps,

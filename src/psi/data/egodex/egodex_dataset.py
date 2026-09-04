@@ -171,6 +171,29 @@ def convert_to_delta_actions(actions, chunk_size, cam_ext):
     ], axis=1)  # (N-1, 48)
     return delta_actions
 
+def convert_to_abs_actions(actions, chunk_size, cam_ext):
+    """Absolute ee pose in the chunk frame-0 camera frame for frames 1..N-1.
+    48D output layout, per hand [wrist_xyz(3), wrist_6d(6), tips(15)] (both hands -> 48):
+    the wrist pose is kept ABSOLUTE in the frame-0 camera frame (no subtraction / no
+    relative rotation), with rotation as 6D (first two columns of the rotation matrix).
+    NOTE: this is a different representation from convert_to_delta_actions (which uses
+    consecutive-frame deltas with rpy + zero-pad), so it needs its own normalization stats."""
+    inv_ext = np.linalg.inv(cam_ext)
+    out = []
+    for base in (0, 24):
+        wrist = np.empty((chunk_size, 4, 4), dtype=np.float32)
+        for i in range(actions.shape[0]):
+            wrist[i] = d9_to_mat44(actions[i, base:base + 9])
+        wrist_cam = inv_ext[None] @ wrist
+        xyz = wrist_cam[1:, :3, 3]
+        six_d = np.concatenate([wrist_cam[1:, :3, 0], wrist_cam[1:, :3, 1]], axis=1)
+        tips = points_to_camera(
+            actions[:, base + 9:base + 24].reshape(-1, 3), cam_ext
+        ).reshape(chunk_size, 15)[1:]
+        out += [xyz, six_d, tips]
+    return np.concatenate(out, axis=1)  # (N-1, 48)
+
+
 class EgoDexDataset:
     """EgoDex dataset loader"""
 
@@ -185,6 +208,7 @@ class EgoDexDataset:
         # require_image=True,
         viz=False,
         use_delta_actions=False,
+        use_abs_actions=False,
         load_retarget=False,
         data_downsample=1,
     ):
@@ -201,6 +225,7 @@ class EgoDexDataset:
         self.val = val
         self.viz = viz
         self.use_delta_actions = use_delta_actions
+        self.use_abs_actions = use_abs_actions
         self.load_retarget = load_retarget
         # self.use_precomp_lang_embed = use_precomp_lang_embed
         # self.require_image = require_image
@@ -461,15 +486,16 @@ class EgoDexDataset:
                     # Construct 48-dimensional actions using current index
                     current_action = self.construct_48d_action(root, [index]) # (1, 48)
                 
-                chunk_size = self.chunk_size + 1 if self.use_delta_actions else self.chunk_size
+                window_shifted = self.use_delta_actions or self.use_abs_actions
+                chunk_size = self.chunk_size + 1 if window_shifted else self.chunk_size
                 # Future action sequence
                 action_end = min(
                     index + chunk_size * self.upsample_rate, 
                     max_index + 1
                 )
                 action_indices = list(
-                    range(index if self.use_delta_actions else index + self.upsample_rate, 
-                          action_end, 
+                    range(index if window_shifted else index + self.upsample_rate,
+                          action_end,
                           self.upsample_rate)
                 )
 
@@ -501,7 +527,9 @@ class EgoDexDataset:
                 cam_ext = np.array(root['/transforms/camera'][index]) # type: ignore , extrinsics
                 cam_int = root['/camera/intrinsic'][:] # # type: ignore , intrinsics
 
-                if self.use_delta_actions:
+                if self.use_abs_actions:
+                    actions = convert_to_abs_actions(actions, chunk_size, cam_ext)
+                elif self.use_delta_actions:
                     if self.load_retarget:
                         actions = actions[1:] - actions[:-1]
                     else:

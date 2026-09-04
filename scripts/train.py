@@ -3,7 +3,12 @@ from __future__ import annotations
 from dotenv import load_dotenv
 assert load_dotenv(), "Failed to load .env file. Make sure it exists and is properly formatted."
 import os
+import builtins
+import importlib
+import sys
+import time
 import re
+import time
 import torch
 import gc
 from tqdm import tqdm
@@ -16,8 +21,9 @@ import importlib
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from psi.config.config import LaunchConfig
-from psi.utils import batch_str_to_tensor, seed_everything, initialize_overwatch, nice, flatten
+from psi.utils import batch_str_to_tensor, seed_everything, initialize_overwatch, nice, flatten, cfg_json_default
 from psi.trainers import Trainer
+from psi.trainers.trainer import should_save_training_checkpoint
 
 overwatch = initialize_overwatch(__name__)
 
@@ -25,10 +31,11 @@ from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.data_loader import (
     DataLoaderStateMixin as AcceleratorDataLoaderStateMixin,
 )
-from accelerate.utils import ProjectConfiguration
+from accelerate.utils import DataLoaderConfiguration, ProjectConfiguration
 import random, numpy as np
 
 MAX_TRAINING_EPOCHS = 1_000_000
+
 
 def _auto_tag_run(run_name: str):
     """commit the code and tag the run with the run name"""
@@ -65,7 +72,10 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
         log_with=trainer.cfg.log.report_to,
         project_config=accelerator_project_config,
         fsdp_plugin=fsdp_plugin,
-        deepspeed_plugin=deepspeed_plugin
+        deepspeed_plugin=deepspeed_plugin,
+        dataloader_config=DataLoaderConfiguration(
+            dispatch_batches=False,
+        )
     )
 
     if trainer.cfg.train.data_parallel == "deepspeed":
@@ -105,12 +115,25 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
             if trainer.cfg.train.resume_from_checkpoint is not None and trainer.cfg.wandb.resume != "never":
                 run_id = wandb_config.get("id") or getattr(trainer.cfg.wandb, "id", None)
                 if not run_id :
-                    run_dir = os.path.join(*trainer.cfg.train.resume_from_checkpoint.split("/")[:3])
-                    if os.path.exists(os.path.join(run_dir, "run_config.json")):
-                        with open(os.path.join(run_dir, "run_config.json")) as f:
+                    _rp = os.path.expanduser(trainer.cfg.train.resume_from_checkpoint)
+                    if re.fullmatch(r"ckpt_[0-9]+", os.path.basename(_rp)):
+                        _rp = os.path.dirname(os.path.dirname(_rp))
+                    run_config_path = os.path.join(_rp, "run_config.json")
+                    run_config_path = run_config_path if os.path.isfile(run_config_path) else None
+                    if run_config_path is not None:
+                        with open(run_config_path) as f:
                             run_id = (json.load(f).get("wandb") or {}).get("id")
-                            overwatch.info(f"resume wandb with run id: {run_id}")
+                            overwatch.info(
+                                "Resume W&B identity from "
+                                f"{run_config_path}: run_id={run_id}"
+                            )
                         wandb_config["id"] = run_id
+                if trainer.cfg.wandb.resume == "must" and not run_id:
+                    raise RuntimeError(
+                        "wandb.resume='must' requires the source immutable segment "
+                        "receipt (or legacy run_config.json fallback) to contain a "
+                        "non-empty wandb.id"
+                    )
                         
             accelerator.init_trackers(project, tracker_config, {"wandb": wandb_config})
             for tracker in accelerator.trackers:
@@ -119,13 +142,6 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
                     trainer.cfg.wandb.name = tracker.run.name
                     trainer.cfg.wandb.entity = tracker.run.entity
                     trainer.cfg.wandb.group = tracker.run.group
-
-        # Log the configuration
-        os.makedirs(trainer.project_dir, exist_ok=True)
-        # draccus.dump(cfg, open(f'{project_dir}/run_config.yaml','w'))
-        with open(f"{trainer.project_dir}/run_config.json", "w") as f:
-             f.write(trainer.cfg.model_dump_json(indent=4))
-        overwatch.info(f"Saved configuration to {trainer.project_dir}")
 
         # Write down the sys.argv to argv.txt
         argv_path = os.path.join(trainer.project_dir, "argv.txt")
@@ -156,12 +172,15 @@ def _initialize_accelerator(trainer: Trainer) -> Accelerator:
                     f.write(f"{k}={v}\n")
 
         # copy dataset statistics file if exists
-        if hasattr(trainer.cfg.data.transform.field, "stat_path"):
+        data_transform = getattr(trainer.cfg.data, "transform", None)
+        field_transform = getattr(data_transform, "field", None)
+        if hasattr(field_transform, "stat_path"):
             from psi.utils import resolve_path
-            stat_path = resolve_path(trainer.cfg.data.transform.field.stat_path) # type: ignore
+            stat_path = resolve_path(field_transform.stat_path) # type: ignore
             if os.path.exists(stat_path):
                 dst_stat_path = os.path.join(trainer.project_dir, "dataset_statistics.json")
                 shutil.copy2(stat_path, dst_stat_path)
+
     trainer.accelerator = accelerator
     return accelerator
 
@@ -189,6 +208,19 @@ def train(config: LaunchConfig):
     overwatch.info(f"max gradient norm: {config.train.max_grad_norm}", ctx_level=1)
 
     train_dataset, val_dataset = trainer.create_datasets()
+    if overwatch.is_rank_zero():
+        # Log the configuration
+        os.makedirs(trainer.project_dir, exist_ok=True)
+        with open(f"{trainer.project_dir}/run_config.json", "w") as f:
+            json.dump(trainer.cfg.model_dump(), f, indent=4, default=cfg_json_default)
+        overwatch.info(f"Saved configuration to {trainer.project_dir}")
+        # dump the norm stats for mixed dataset
+        if hasattr(train_dataset, "raw_dataset") and hasattr(train_dataset.raw_dataset, "merged_metadata"):
+            for tag, metadata in train_dataset.raw_dataset.merged_metadata.items():
+                with open(f"{trainer.project_dir}/{tag}_norm_stats.json", "w") as f:
+                    json.dump(metadata.statistics.model_dump(mode='json'), f, indent=4)
+                overwatch.info(f"Saved normalization stats for {tag} to .../{tag}_norm_stats.json")
+
     overwatch.info(f"Num training samples:", ctx_level=1)
     overwatch.info(f"Training dataset size: {trainer.len_train_dataset:,}", ctx_level=2)  # type: ignore
     if val_dataset:
@@ -213,11 +245,32 @@ def train(config: LaunchConfig):
 
     trainer.prepare(accelerator)
     global_step = initial_global_step = trainer.resume_from_checkpoint()[0]
-    epoch_start = global_step // trainer.num_steps_per_epoch
+    if initial_global_step >= trainer.max_training_steps:
+        raise RuntimeError(
+            "resume checkpoint has no remaining work: "
+            f"initial_global_step={initial_global_step}, "
+            f"max_training_steps={trainer.max_training_steps}"
+        )
+    # Resume data position: skip already-consumed microbatches when skip_resumed_steps
+    # is set. IterableDataset streams run longer than their reported __len__, so advance
+    # from the start of the stream rather than modulo len(dataloader).
+    if isinstance(trainer.train_dataset, torch.utils.data.IterableDataset):
+        epoch_start = 0
+        resumed_micro_steps_to_skip = initial_global_step * trainer.gradient_accumulation_steps
+    else:
+        epoch_start = initial_global_step // trainer.num_steps_per_epoch
+        resumed_micro_steps_to_skip = (
+            initial_global_step % trainer.num_steps_per_epoch
+        ) * trainer.gradient_accumulation_steps
+    if initial_global_step and config.train.skip_resumed_steps:
+        overwatch.info(
+            "Resume data position: "
+            f"epoch_start={epoch_start}, microbatches_to_skip={resumed_micro_steps_to_skip}"
+        )
 
     overwatch.info(f"Accelerator runs in: {trainer.project_dir}")
     trainer.set_train()
-    
+
     progress_bar = tqdm(
         range(0, trainer.max_training_steps),
         initial=initial_global_step,
@@ -226,31 +279,35 @@ def train(config: LaunchConfig):
         position=0,
     )
 
-    is_max_train_steps_reached = (initial_global_step >= trainer.max_training_steps)
+    is_training_end_reached = False
     # skip_resumed_steps = False
     skip = 0
-
     for epoch in range(epoch_start, MAX_TRAINING_EPOCHS):
         trainer.next_epoch(epoch)
         accelerator.wait_for_everyone()
         for local_step, batch in enumerate(trainer.train_dataloader):
             if (
                 config.train.skip_resumed_steps
-                and skip < initial_global_step % trainer.num_steps_per_epoch
+                and skip < resumed_micro_steps_to_skip
             ):
                 # skip to inital global step
                 skip += 1
                 continue
             sync_gradients, losses = trainer.step(batch_str_to_tensor(batch), global_step, local_step)
-            
+
             if sync_gradients:
+                completed_step = global_step + 1
                 # log metrics
-                trainer.log(flatten({**losses, "epoch": epoch}, parent_key="train")) 
+                trainer.log(flatten({**losses, "epoch": epoch}, parent_key="train"))
 
                 # save checkpoints
-                if (global_step + 1) % config.train.checkpointing_steps == 0 or global_step == trainer.max_training_steps - 1:
+                if should_save_training_checkpoint(
+                    completed_step,
+                    config.train.checkpointing_steps,
+                    trainer.max_training_steps,
+                ):
                     accelerator.wait_for_everyone() # ensures fsdp checkpointing without deadlock
-                    save_path = trainer.save_checkpoint(global_step+1)
+                    save_path = trainer.save_checkpoint(completed_step)
                     accelerator.wait_for_everyone()
                     
                     if overwatch.is_rank_zero():
@@ -258,9 +315,8 @@ def train(config: LaunchConfig):
 
                 # validation
                 if config.train.validation_steps > 0 and (
-                        global_step == 0 or
-                        (global_step + 1) % config.train.validation_steps == 0 or
-                        global_step == trainer.max_training_steps - 1
+                        global_step % config.train.validation_steps == 0 or
+                        completed_step == trainer.max_training_steps
                     ) :
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -272,6 +328,8 @@ def train(config: LaunchConfig):
                         if eval_losses is not None: # FIXME
                             trainer.log(flatten(eval_losses, parent_key="eval")) 
                     trainer.set_train()
+                    gc.collect()
+                    torch.cuda.empty_cache()  # release generation buffers (KV cache) before resuming training
                     """ NOTE:
                         This is a workaround for iterating over val_dataloader in the middle of training_dataloader.
                         When val dataloader dost not end explicitly, eg., the val dataloader is wrapped in a tqdm progress bar,
@@ -299,12 +357,20 @@ def train(config: LaunchConfig):
 
             if global_step >= trainer.max_training_steps:
                 if overwatch.is_rank_zero():
-                    tqdm.write("Training has reached maximum steps.")
-                is_max_train_steps_reached = True  # set to break outer loop
+                    tqdm.write(
+                        f"Training has reached max training steps {trainer.max_training_steps}."
+                    )
+                is_training_end_reached = True  # set to break outer loop
                 break
 
-        if is_max_train_steps_reached:
+        if is_training_end_reached:
             break
+
+    if global_step != trainer.max_training_steps:
+        raise RuntimeError(
+            "training loop ended before max_training_steps: "
+            f"global_step={global_step}, max_training_steps={trainer.max_training_steps}"
+        )
 
     accelerator.wait_for_everyone()
     trainer.finalize()

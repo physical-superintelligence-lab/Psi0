@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, List, cast
 import re
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 if TYPE_CHECKING:
@@ -14,8 +15,33 @@ from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, Qwen2To
 from accelerate import Accelerator
 from torch.nn.utils.rnn import pad_sequence
 # from psi.config.tokenizer import BinActionTokenizerConfig
-from psi.utils import initialize_overwatch #, shorten, seed_everything
+from psi.utils import initialize_overwatch, str_to_tensor #, shorten, seed_everything
 overwatch = initialize_overwatch(__name__)
+
+
+def _pad_string_tensor_batch(strings: list[str], max_length: int = 128) -> torch.Tensor:
+    encoded = [str_to_tensor(s)[:max_length] for s in strings]
+    padded = pad_sequence(encoded, batch_first=True)
+    if padded.shape[1] < max_length:
+        padded = torch.nn.functional.pad(padded, (0, max_length - padded.shape[1]), value=0)
+    return padded[:, :max_length]
+
+def _stack_images(imgs: list[torch.Tensor], channels_first: bool) -> torch.Tensor:
+    """Stack per-sample image tensors; if H/W differ, resize all to the first sample's H/W.
+    channels_first: (..., C, H, W) else (..., H, W, C)."""
+    ref = imgs[0].shape
+    if all(im.shape == ref for im in imgs):
+        return torch.stack(imgs)
+    hw = ref[-2:] if channels_first else ref[-3:-1]
+    out = []
+    for im in imgs:
+        x = im if channels_first else im.movedim(-1, -3)
+        lead = x.shape[:-3]
+        x = F.interpolate(x.reshape(-1, *x.shape[-3:]).float(), size=hw, mode="nearest").to(im.dtype)
+        x = x.reshape(*lead, *x.shape[-3:])
+        out.append(x if channels_first else x.movedim(-3, -1))
+    return torch.stack(out)
+
 
 class PaddedCollatorForActionPrediction:
     def __init__(self, model_max_length, pad_token_id, padding_side="right", pixel_values_dtype=torch.float32):
@@ -29,17 +55,27 @@ class PaddedCollatorForActionPrediction:
         # Extract sequences
         input_ids = [instance["input_ids"].squeeze(0) if instance["input_ids"].dim() == 2 else instance["input_ids"] 
                     for instance in instances]
-        labels = [instance["labels"].squeeze(0) if instance["labels"].dim() == 2 else instance["labels"] 
-                for instance in instances]
+        labels = []
+        for ids, instance in zip(input_ids, instances):
+            try:
+                lab = instance["labels"]
+                labels.append(lab.squeeze(0) if lab.dim() == 2 else lab)
+            except KeyError:  # eval/generation samples carry no labels
+                labels.append(torch.full_like(ids, -100))
         pixel_values = [instance["pixel_values"] for instance in instances]
         dataset_names = [instance["dataset_name"] for instance in instances] if "dataset_name" in instances[0] else None
-
-        # Only support right padding for now
-        assert self.padding_side == "right", f"Invalid Tokenizer padding_side={self.padding_side}"
+        # which goal source produced each sample (subgoal_jpg / real_future / wm_future,
+        # or "none" when the goal image was dropped) -- used only to break the val
+        # metric down by mode; training never reads it
+        # gate on ANY instance: the transform omits the key entirely when the goal
+        # image was dropped, so instances[0] alone is not a reliable probe
+        goal_sources = ([str(instance.get("goal_source") or "none") for instance in instances]
+                        if any("goal_source" in inst for inst in instances) else None)
+        instructions = [instance["instruction"] for instance in instances] if "instruction" in instances[0] else None
 
         # Pad sequences
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
-        labels = pad_sequence(labels, batch_first=True, padding_value=-100)
+        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id, padding_side=self.padding_side)
+        labels = pad_sequence(labels, batch_first=True, padding_value=-100, padding_side=self.padding_side)
 
         # Truncate if longer than model_max_length
         input_ids = input_ids[:, :self.model_max_length]
@@ -48,16 +84,17 @@ class PaddedCollatorForActionPrediction:
         # Attention mask based on pad token
         attention_mask = input_ids.ne(self.pad_token_id)
 
-        # Stack pixel_values
+        # Cat pixel_values to flat (total_patches, dim): variable #images/sample
+        # (subgoal dropout) -> cat, not stack; matches PaddedCollatorForTogether.
         if isinstance(pixel_values[0], torch.Tensor):
-            pixel_values = torch.stack(pixel_values).to(dtype=self.pixel_values_dtype)
+            pixel_values = torch.cat(pixel_values, dim=0).to(dtype=self.pixel_values_dtype)
         elif isinstance(pixel_values[0], dict):
-            pixel_values = {k: torch.stack([pv[k] for pv in pixel_values]) for k in pixel_values[0]}
+            pixel_values = {k: torch.cat([pv[k] for pv in pixel_values], dim=0) for k in pixel_values[0]}
         else:
             raise ValueError(f"Unsupported pixel_values type: {type(pixel_values[0])}")
 
-        # Stack image_grid_thw
-        image_grid_thw = torch.stack([instance["image_grid_thw"].squeeze(0) for instance in instances])
+        # Cat image_grid_thw to flat (total_images, 3): matches the cat'd pixel_values.
+        image_grid_thw = torch.cat([instance["image_grid_thw"] for instance in instances], dim=0)
 
         # Build output
         output = {
@@ -67,10 +104,20 @@ class PaddedCollatorForActionPrediction:
             "pixel_values": pixel_values, 
             "image_grid_thw": image_grid_thw,
         }
+        # see also:  batch_str_to_tensor in src/psi/data/gear/transform/base.py for similar encoding of string metadata
         if dataset_names is not None:
-            output["dataset_name"] = dataset_names
+            # encode as padded uint8 tensor so accelerate can concatenate across processes
+            output["dataset_name_str"] = pad_sequence(
+                [str_to_tensor(s) for s in dataset_names], batch_first=True
+            )
+        if goal_sources is not None:
+            output["goal_source_str"] = pad_sequence(
+                [str_to_tensor(s) for s in goal_sources], batch_first=True
+            )
+        if instructions is not None:
+            output["instruction_str"] = _pad_string_tensor_batch(instructions, max_length=128)
 
-        raw_actions = np.stack([instance["raw_actions"] for instance in instances]) if "raw_actions" in instances[0] else None
+        raw_actions = [instance["raw_actions"] for instance in instances] if "raw_actions" in instances[0] else None
         if raw_actions is not None:
             output["raw_actions"] = raw_actions
 
@@ -78,9 +125,13 @@ class PaddedCollatorForActionPrediction:
         if actions_mask is not None:
             output["actions_mask"] = actions_mask
 
-        raw_images = torch.stack([torch.from_numpy(np.array(instance["raw_images"])) for instance in instances]) if "raw_images" in instances[0] else None
+        raw_images = torch.stack([torch.from_numpy(np.array(instance["observations"])) for instance in instances]) if "observations" in instances[0] else None
         if raw_images is not None:
-            output["raw_images"] = raw_images
+            output["observations"] = raw_images
+
+        for key in ("episode_index", "frame_index"):
+            if key in instances[0]:
+                output[key] = torch.tensor([instance[key] for instance in instances])
 
         return output
 
@@ -92,13 +143,21 @@ class PaddedCollatorForTogether:
         self.pixel_values_dtype = pixel_values_dtype
 
     def __call__(self, instances):
-        
         # Extract sequences
-        input_ids = [instance["input_ids"].squeeze(0) if instance["input_ids"].dim() == 2 else instance["input_ids"] 
+        input_ids = [instance["input_ids"].squeeze(0) if instance["input_ids"].dim() == 2 else instance["input_ids"]
                     for instance in instances]
 
         pixel_values = [instance["pixel_values"] for instance in instances]
+        pixel_values_videos = [instance["pixel_values_videos"] for instance in instances] if "pixel_values_videos" in instances[0] else None
         dataset_names = [instance["dataset_name"] for instance in instances] if "dataset_name" in instances[0] else None
+        # which goal source produced each sample (subgoal_jpg / real_future / wm_future,
+        # or "none" when the goal image was dropped) -- used only to break the val
+        # metric down by mode; training never reads it
+        # gate on ANY instance: the transform omits the key entirely when the goal
+        # image was dropped, so instances[0] alone is not a reliable probe
+        goal_sources = ([str(instance.get("goal_source") or "none") for instance in instances]
+                        if any("goal_source" in inst for inst in instances) else None)
+        instructions = [instance["instruction"] for instance in instances] if "instruction" in instances[0] else None
 
         # Only support right padding for now
         assert self.padding_side == "right", f"Invalid Tokenizer padding_side={self.padding_side}"
@@ -112,28 +171,39 @@ class PaddedCollatorForTogether:
         # Attention mask based on pad token
         attention_mask = input_ids.ne(self.pad_token_id)
 
-        # Stack pixel_values
         if isinstance(pixel_values[0], torch.Tensor):
-            pixel_values = torch.stack(pixel_values).to(dtype=self.pixel_values_dtype)
+            pixel_values = torch.cat(pixel_values, dim=0).to(dtype=self.pixel_values_dtype)
         elif isinstance(pixel_values[0], dict):
-            pixel_values = {k: torch.stack([pv[k] for pv in pixel_values]) for k in pixel_values[0]}
+            pixel_values = {k: torch.cat([pv[k] for pv in pixel_values], dim=0) for k in pixel_values[0]}
         else:
             raise ValueError(f"Unsupported pixel_values type: {type(pixel_values[0])}")
 
-        # Stack image_grid_thw
-        image_grid_thw = torch.stack([instance["image_grid_thw"].squeeze(0) for instance in instances])
+        B = len(instances)
+        # cat -> (total_images, 3): flat form Qwen expects; matches cat'd pixel_values above.
+        image_grid_thw = torch.cat([instance["image_grid_thw"] for instance in instances], dim=0)
 
         # Build output
         output = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "pixel_values": pixel_values, 
+            "pixel_values": pixel_values,
             "image_grid_thw": image_grid_thw,
         }
+        # see also:  batch_str_to_tensor in src/psi/data/gear/transform/base.py for similar encoding of string metadata
         if dataset_names is not None:
-            output["dataset_name"] = dataset_names
+            # encode as padded uint8 tensor so accelerate can concatenate across processes
+            output["dataset_name_str"] = pad_sequence(
+                [str_to_tensor(s) for s in dataset_names], batch_first=True
+            )
+        if goal_sources is not None:
+            output["goal_source_str"] = pad_sequence(
+                [str_to_tensor(s) for s in goal_sources], batch_first=True
+            )
 
-        raw_actions = np.stack([instance["raw_actions"] for instance in instances]) if "raw_actions" in instances[0] else None
+        if instructions is not None:
+            output["instruction_str"] = _pad_string_tensor_batch(instructions, max_length=128)
+
+        raw_actions = [instance["raw_actions"] for instance in instances] if "raw_actions" in instances[0] else None
         if raw_actions is not None:
             output["raw_actions"] = raw_actions
 
@@ -142,10 +212,6 @@ class PaddedCollatorForTogether:
         if actions_mask is not None:
             output["actions_mask"] = actions_mask
 
-        raw_images = torch.stack([torch.from_numpy(np.array(instance["raw_images"])) for instance in instances]) if "raw_images" in instances[0] else None
-        if raw_images is not None:
-            output["raw_images"] = raw_images
-
         actions = torch.stack([torch.from_numpy(np.array(instance["actions"])) for instance in instances]) if "actions" in instances[0] else None
         if actions is not None:
             output["actions"] = actions
@@ -153,6 +219,38 @@ class PaddedCollatorForTogether:
         states = torch.stack([torch.from_numpy(np.array(instance["states"])) for instance in instances]) if "states" in instances[0] else None
         if states is not None:
             output["states"] = states
+
+        # raw uint8 images (logging only): with mixed resolutions, resize to the first sample's size
+        if "observations" in instances[0]:
+            output["observations"] = _stack_images(
+                [torch.as_tensor(np.array(instance["observations"])) for instance in instances], channels_first=True)
+
+        # handle subgoal images if present, watch out for possible dropouts
+        subgoal_image_shapes = [instance["subgoal"].shape for instance in instances if  "subgoal" in instance]
+        if len(subgoal_image_shapes) > 0:
+            zero_subgoal = torch.zeros(subgoal_image_shapes[0], dtype=torch.uint8)
+            output["subgoal"] = _stack_images([
+                torch.as_tensor(instance["subgoal"]) if "subgoal" in instance else zero_subgoal
+                for instance in instances
+            ], channels_first=False)
+
+        for key in ("episode_index", "frame_index"):
+            if key in instances[0]:
+                output[key] = torch.tensor([instance[key] for instance in instances])
+
+        if pixel_values_videos:
+            output["pixel_values_videos"] = torch.cat(pixel_values_videos, dim=0).to(dtype=self.pixel_values_dtype)
+
+        # Deferred video path: raw frames (B, T, C, H, W) shipped to GPU, where
+        # pixel_values_videos is computed batched. Keep native dtype (uint8) to
+        # minimize host->device transfer; the GPU kernel rescales/normalizes.
+        if "raw_video_frames" in instances[0]:
+            output["raw_video_frames"] = torch.stack(
+                [torch.as_tensor(instance["raw_video_frames"]) for instance in instances]
+            )
+
+        if "video_grid_thw" in instances[0]:
+            output["video_grid_thw"] = torch.cat([instance["video_grid_thw"] for instance in instances], dim=0)
 
         return output
 
