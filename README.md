@@ -91,6 +91,21 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Set up the $\Psi_0$ environment:
 
+> ℹ️ We manage the $\Psi_0$ environment and all the baselines through `uv` and they all share the same `src/` code.  See [Environment Management](baselines/README.md) for more details.
+
+```
+uv venv .venv-psi --python 3.11
+source .venv-psi/bin/activate
+GIT_LFS_SKIP_SMUDGE=1 uv sync \
+  --group serve \
+  --group viz \
+  --group psi \
+  --index-strategy unsafe-best-match \
+  --active
+uv pip install flash_attn==2.7.4.post1 --no-build-isolation
+```
+
+
 Test installation, a version number should be displayed.
 ```bash
 python -c "import psi;print(psi.__version__);"
