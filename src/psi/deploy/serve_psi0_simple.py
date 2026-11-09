@@ -112,6 +112,25 @@ class Server:
         assert self.Ta <= self.Tp, "action_exec_horizon is too big"
         self.launch_config = launch_config
         self.count = 0
+
+        # combined_temb models need a pooled_projections vector per instruction: load the
+        # trainer's pooled cache from run_dir and compute unseen instructions on the fly.
+        # Older checkpoints have no pooled_text_encoder and keep serving without it.
+        self.pooled_helper = None
+        mc = launch_config.model
+        if getattr(mc, "pooled_text_encoder", None) is not None:
+            from psi.deploy.serve_psi0_sonic import PooledTextEncoderCache
+            cache_rel = getattr(mc, "pooled_cache_path", None)
+            cache_file = None
+            if cache_rel is not None:
+                cache_file = cache_rel if osp.isabs(cache_rel) else str(run_dir / cache_rel)
+            self.pooled_helper = PooledTextEncoderCache(
+                cache_path=cache_file,
+                encoder=mc.pooled_text_encoder,
+                encoder_path=mc.pooled_text_encoder_path,
+                projection_dim=mc.pooled_projection_dim,
+                device=self.device,
+            )
         
         self.num_inference_steps = int(num_inference_steps)
         self.pig_mask_schedule = pig_mask_schedule
@@ -368,6 +387,8 @@ class Server:
                     num_inference_steps=self.num_inference_steps,
                     traj2ds=None,
                 )
+                if self.pooled_helper is not None:
+                    common["pooled_projections"] = self.pooled_helper(instruction)
                 current_time = time.monotonic()
                 if (not self.enable_rtc or self.previous_action is None
                         or "reset" in history_dict):

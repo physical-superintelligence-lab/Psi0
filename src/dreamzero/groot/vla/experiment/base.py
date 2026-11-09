@@ -528,6 +528,24 @@ class BaseTrainer(transformers.Trainer):
 
             return ret
 
+    def _rotate_checkpoints(self, use_mtime=False, output_dir=None) -> None:
+        keep_every = getattr(self.base_cfg, "keep_checkpoint_every", None)
+        if not keep_every:
+            return super()._rotate_checkpoints(use_mtime=use_mtime, output_dir=output_dir)
+
+        # Keep the newest checkpoint (for resume) and the newest one on a keep_every boundary.
+        checkpoints_sorted = self._sorted_checkpoints(use_mtime=use_mtime, output_dir=output_dir)
+        if not checkpoints_sorted:
+            return
+        keep = {checkpoints_sorted[-1]}
+        milestones = [c for c in checkpoints_sorted if int(c.rsplit("-", 1)[-1]) % keep_every == 0]
+        if milestones:
+            keep.add(milestones[-1])
+        for checkpoint in checkpoints_sorted:
+            if checkpoint not in keep:
+                print(f"Deleting checkpoint [{checkpoint}] (keep_checkpoint_every={keep_every})")
+                shutil.rmtree(checkpoint, ignore_errors=True)
+
     def train(
         self,
         resume_from_checkpoint=None,
@@ -600,6 +618,31 @@ class BaseTrainer(transformers.Trainer):
         return DataLoader(train_dataset, **dataloader_params)
 
 
+
+def _find_previous_wandb_run_id(output_dir: str):
+    """Return the wandb run id of the last attempt that ran in ``output_dir``, or None.
+
+    WANDB_DIR is set to output_dir, so wandb leaves ``output_dir/wandb/latest-run ->
+    run-<timestamp>-<id>``. Fall back to the id recorded in wandb_config.json.
+    """
+    wandb_dir = Path(output_dir) / "wandb"
+    latest = wandb_dir / "latest-run"
+    if latest.exists():
+        name = os.path.basename(os.path.realpath(latest))
+        run_id = name.rsplit("-", 1)[-1]
+        if name.startswith("run-") and run_id:
+            return run_id
+    cfg_file = Path(output_dir) / "wandb_config.json"
+    if cfg_file.exists():
+        try:
+            run_id = json.load(open(cfg_file)).get("run_id", "")
+        except Exception:
+            run_id = ""
+        if run_id:
+            return run_id
+    return None
+
+
 class BaseExperiment(ABC):
     def __init__(self, cfg: DictConfig):
         # assert cfg.save_steps == 500, "save_steps must be 500 for standarized evaluation"
@@ -644,9 +687,18 @@ class BaseExperiment(ABC):
             runtime_id = os.environ.get("RUNTIME_ID", None)
             """If a RUNTIME_ID is available in the environment, we use it as the wandb id,
             which will allow to display the evaluation results and the training results
-            in the same wandb run. Otherwise, we create a new run."""
+            in the same wandb run. Otherwise, reuse the run id of a previous attempt in
+            this output_dir (Slurm requeue / manual resume) so the restarted job keeps
+            logging into the same wandb run instead of opening a new one."""
             if runtime_id:
                 os.environ["WANDB_RUN_ID"] = runtime_id
+            else:
+                prev_run_id = _find_previous_wandb_run_id(training_args.output_dir)
+                if prev_run_id:
+                    print(f"Resuming wandb run {prev_run_id} found under {training_args.output_dir}")
+                    os.environ["WANDB_RUN_ID"] = prev_run_id
+        # "allow": resume the run if WANDB_RUN_ID exists on the server, else start a new one.
+        os.environ.setdefault("WANDB_RESUME", "allow")
         os.environ["WANDB_DIR"] = training_args.output_dir
         wandb_group = cfg.get("wandb_group", None)
         if wandb_group and "WANDB_RUN_GROUP" not in os.environ:
@@ -675,7 +727,7 @@ class BaseExperiment(ABC):
             exit(0)
         if resume_path:
             print(f"Resuming training from {resume_path}")
-            resume_from_checkpoint = True
+            resume_from_checkpoint = resume_path
         else:
             # First time training.
             resume_from_checkpoint = False

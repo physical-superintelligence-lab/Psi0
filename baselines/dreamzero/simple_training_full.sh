@@ -55,7 +55,9 @@ if [ -f .env ]; then
     set +a
 fi
 
-source .venv-dreamzero/bin/activate
+# Prefer the node-local copy that slurm_job.sh stages and mounts at /workspace/.venv-dreamzero
+# (scripts/train/stage_venv_local.sh); fall back to the beegfs venv when run directly.
+source "${DZ_VENV:-$([ -d /workspace/.venv-dreamzero ] && echo /workspace/.venv-dreamzero || echo .venv-dreamzero)}/bin/activate"
 PYTHON_BIN=$(readlink -f "$(command -v python3)")
 
 # Ensure cuDNN sub-libraries load from the venv (one consistent build) rather than
@@ -82,7 +84,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-".runs/dreamzero/$TASK_NAME-full"}
 echo "Output Directory: $OUTPUT_DIR"
 
 MAX_STEPS=${MAX_STEPS:-20000}
-SAVE_STEPS=${SAVE_STEPS:-5000}
+SAVE_STEPS=${SAVE_STEPS:-500}
 
 # Number of GPUs per node: prefer the count of CUDA_VISIBLE_DEVICES (set by
 # slurm_job.sh), fall back to nvidia-smi, then to 8.
@@ -165,6 +167,7 @@ torchrun \
     logging_steps=10 \
     weight_decay=1e-5 \
     save_total_limit=5 \
+    keep_checkpoint_every=${KEEP_CHECKPOINT_EVERY:-1000} \
     upload_checkpoints=false \
     bf16=true \
     tf32=true \

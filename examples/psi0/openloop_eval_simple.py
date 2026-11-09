@@ -29,21 +29,20 @@ from psi.config.config import LaunchConfig
 
 CKPT_STEP = 40000
 
-# Action component labels and split boundaries (36-dim action)
+# Action component labels and split boundaries (36-dim action, see meta/modality.json)
 LABELS = [
     "hand_joints",   # [0:14]
     "arm_joints",    # [14:28]
-    "torsor_roll",   # [28:31]  (torso rpy, 3-dim)
-    "torsor_pitch",  # [31:32]
-    "torsor_yaw",    # [32:33]
-    "height",        # [33:34]
-    "vx",            # [34:35]
-    "vy",            # [35:36]
-    "torso_vyaw",    # unused in print split but used in plot split
-    "target_yaw",
+    "torsor_roll",   # [28:29]
+    "torsor_pitch",  # [29:30]
+    "torsor_yaw",    # [30:31]
+    "height",        # [31:32]
+    "vx",            # [32:33]
+    "vy",            # [33:34]
+    "torso_vyaw",    # [34:35]  teleop: yaw-rate cmd; MP tasks: turning flag (0/1)
+    "target_yaw",    # [35:36]
 ]
-PRINT_SPLITS = [14, 28, 31, 32, 33, 34, 35]   # 8 groups
-PLOT_SPLITS  = [14, 28, 29, 30, 31, 32, 33, 34, 35]  # 10 groups
+SPLITS = [14, 28, 29, 30, 31, 32, 33, 34, 35]  # 10 groups
 
 
 def parse_args():
@@ -96,7 +95,7 @@ def main():
     data_cfg: LerobotDataConfig = launch_config.data  # type: ignore
     maxmin = data_cfg.transform.field
 
-    transform_kwargs = dict(vlm_processor=psi0.vlm_processor)
+    transform_kwargs = dict(vlm_processor=psi0.vlm_processor, no_aug=True)
     # vlm_processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-2B-Instruct")
     # transform_kwargs = dict(vlm_processor=vlm_processor)
     dataset = data_cfg(split="train", transform_kwargs=transform_kwargs)
@@ -125,7 +124,7 @@ def main():
         frame = dataset[i]
         # print(frame.keys()); break
 
-        batch_images       = [frame["raw_images"]]
+        batch_images       = [frame["observations"]]
         batch_instructions = [frame["instruction"]]
         batch_states       = torch.from_numpy(frame["states"]).unsqueeze(0).to(device)
 
@@ -152,21 +151,23 @@ def main():
     # Print summary
     # ------------------------------------------------------------------
     print("\n---------------------------\n")
-    for i, seg in enumerate(np.split(mean_error, PRINT_SPLITS)):
+    for i, seg in enumerate(np.split(mean_error, SPLITS)):
         print(f"denormed_err_l1_{LABELS[i]} {seg.shape}:  {np.linalg.norm(seg):.6f}")
 
     # ------------------------------------------------------------------
     # Plot per-step error curves
     # ------------------------------------------------------------------
-    error_groups   = np.split(per_frame_errors, PLOT_SPLITS, axis=-1)
+    error_groups   = np.split(per_frame_errors, SPLITS, axis=-1)
     per_label_norm = [np.linalg.norm(g, axis=-1) for g in error_groups]
     curve_map      = dict(zip(LABELS, per_label_norm))
+    # episode-level denormalized L1 per group (same metric as the printed summary)
+    l1_map         = {k: np.linalg.norm(g) for k, g in zip(LABELS, np.split(mean_error, SPLITS))}
 
     plot_groups = [
         ("hand_joints + arm_joints (rad)", ["hand_joints", "arm_joints"]),
         ("torso rpy (rad)",                ["torsor_roll", "torsor_pitch", "torsor_yaw"]),
         ("height (m)",                     ["height"]),
-        ("vx + vy (m/s)",                  ["vx", "vy"]),
+        ("vx, vy (m/s) + vyaw (rad/s)",   ["vx", "vy", "torso_vyaw"]),
         ("target_yaw (rad)",               ["target_yaw"]),
     ]
 
@@ -174,12 +175,11 @@ def main():
     for ax, (title, keys) in zip(axes, plot_groups):
         for key in keys:
             if key in curve_map:
-                ax.plot(curve_map[key], label=key)
+                ax.plot(curve_map[key], label=f"{key}  (denormed L1 = {l1_map[key]:.4f})")
         ax.set_title(title)
-        ax.set_ylabel("Error norm")
+        ax.set_ylabel("Denormed L1 error")
         ax.grid(True, alpha=0.3)
-        if len(keys) > 1:
-            ax.legend()
+        ax.legend(loc="upper right")
     axes[-1].set_xlabel(f"Sample step in episode (stride={args.stride})")
     plt.suptitle(f"Episode {eps_idx}  |  ckpt step {CKPT_STEP}", y=1.01)
     plt.tight_layout()

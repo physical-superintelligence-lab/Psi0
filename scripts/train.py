@@ -314,7 +314,9 @@ def train(config: LaunchConfig):
                         tqdm.write(f"Saved state to {save_path}")
 
                 # validation
-                if config.train.validation_steps > 0 and (
+                if config.train.validation_steps > 0 and not (
+                        config.train.skip_first_eval and global_step == 0
+                    ) and (
                         global_step % config.train.validation_steps == 0 or
                         completed_step == trainer.max_training_steps
                     ) :

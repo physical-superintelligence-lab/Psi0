@@ -42,7 +42,9 @@ if [ -f .env ]; then
     set +a
 fi
 
-source .venv-dreamzero/bin/activate
+# Prefer the node-local copy that slurm_job.sh stages and mounts at /workspace/.venv-dreamzero
+# (scripts/train/stage_venv_local.sh); fall back to the beegfs venv when run directly.
+source "${DZ_VENV:-$([ -d /workspace/.venv-dreamzero ] && echo /workspace/.venv-dreamzero || echo .venv-dreamzero)}/bin/activate"
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-16}
 export HYDRA_FULL_ERROR=1
@@ -61,7 +63,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-".runs/dreamzero/$TASK_NAME"}
 echo "Output Directory: $OUTPUT_DIR"
 
 MAX_STEPS=${MAX_STEPS:-15000}
-SAVE_STEPS=${SAVE_STEPS:-1000}
+SAVE_STEPS=${SAVE_STEPS:-500}
 # Full FT of an already-finetuned 14B base is sensitive to LR. 1e-5 is a safe
 # start; drop to ~5e-6/2e-6 if you see instability or forgetting.
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
@@ -126,6 +128,7 @@ torchrun --nproc_per_node "$NUM_GPUS" --standalone \
     logging_steps=10 \
     weight_decay=1e-5 \
     save_total_limit=5 \
+    keep_checkpoint_every=${KEEP_CHECKPOINT_EVERY:-1000} \
     upload_checkpoints=false \
     bf16=true \
     tf32=true \

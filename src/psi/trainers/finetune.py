@@ -944,8 +944,12 @@ class FinetuneTrainer(Trainer):
 
                 # action prediction loss
                 pred_actions = self.inference(eval_model, val_batch)
-                err_action_l1 = (pred_actions - gt_actions[:, :Tp]).abs()  # (B, Tp, Da)
-                action_l1_err_list.append(err_action_l1.reshape(-1, Da).float())
+                if getattr(self.maxmin, "yaw_sincos", False):
+                    # (B, Tp, Da-1), yaw column = wrapped angular error in rad
+                    err_action_l1 = self.maxmin.yaw_sincos_l1_err(pred_actions.float(), gt_actions[:, :Tp].float())
+                else:
+                    err_action_l1 = (pred_actions - gt_actions[:, :Tp]).abs()  # (B, Tp, Da)
+                action_l1_err_list.append(err_action_l1.reshape(-1, err_action_l1.shape[-1]).float())
                 if "dataset_name" in val_batch:
                     names = val_batch["dataset_name"] if isinstance(val_batch["dataset_name"], list) else [val_batch["dataset_name"]]
                     dataset_name_list.extend(n for n in names for _ in range(Tp))

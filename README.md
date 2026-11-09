@@ -509,9 +509,10 @@ If your GPU has limited VRAM, set `--train.optimizer-foreach=false` to reduce op
 ```
 export run_dir=<the run dir here under folder .runs>
 export ckpt_step=<checkpoint step>
-uv run --active --group psi --group serve serve_psi0 \
+uv run --active --group psi --group serve serve_psi0_simple \
   --host 0.0.0.0 \
   --port 22085 \
+  --policy=psi0 \
   --run-dir=$run_dir \
   --ckpt-step=$ckpt_step \
   --action-exec-horizon=24 \

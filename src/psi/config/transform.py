@@ -544,28 +544,69 @@ class RealRepackTransform(LerobotRepackTransform):
         } 
         return result
 
+def encode_yaw_sincos(actions: np.ndarray, yaw_dim: int) -> np.ndarray:
+    """(..., Da) -> (..., Da+1): the angle at yaw_dim becomes sin, cos is inserted after it."""
+    yaw = actions[..., yaw_dim]
+    return np.concatenate(
+        [actions[..., :yaw_dim], np.sin(yaw)[..., None], np.cos(yaw)[..., None], actions[..., yaw_dim + 1:]],
+        axis=-1,
+    )
+
+
+def decode_yaw_sincos(actions, yaw_dim: int):
+    """(..., Da+1) -> (..., Da): atan2(sin, cos) back at yaw_dim (numpy or torch)."""
+    if torch.is_tensor(actions):
+        yaw = torch.atan2(actions[..., yaw_dim], actions[..., yaw_dim + 1])
+        return torch.cat([actions[..., :yaw_dim], yaw[..., None], actions[..., yaw_dim + 2:]], dim=-1)
+    yaw = np.arctan2(actions[..., yaw_dim], actions[..., yaw_dim + 1])
+    return np.concatenate([actions[..., :yaw_dim], yaw[..., None], actions[..., yaw_dim + 2:]], axis=-1)
+
+
 class SimpleRepackTransform(LerobotRepackTransform):
     dataset_name: str = "simple"
 
     num_past_frames: int = 0 # single current frame
     action_chunk_size: int = 30
 
+    # Temporal state augmentation, same semantics as RealRepackTransform: the state paired
+    # with (o_t, a_t..a_{t+Tp-1}) is s_{t+k}, k ~ U{-J..J} frames, with probability
+    # state_temporal_jitter_prob; skipped under no_aug (val / deploy). 0 = off.
+    state_temporal_jitter: int = 0
+    state_temporal_jitter_prob: float = 1.0
+
     pad_action_dim: int | None = None
     pad_state_dim: int | None = None
 
+    # Encode the target-yaw angle at action[yaw_dim] as (sin, cos): action dim +1. Must match
+    # ActionStateTransform.yaw_sincos; see docs/plans/yaw-sincos-encoding.md.
+    yaw_sincos: bool = False
+    yaw_dim: int = 35
+
     def delta_timestamps(self, fps: int):
+        J = self.state_temporal_jitter
         return {
             "observation.images.egocentric": [-t/fps for t in range(self.num_past_frames, -1, -1)],
-            "states": [-t/fps for t in range(self.num_past_frames, -1, -1)],
+            # [-(past+J) .. +J]; __call__ slices the (past+1)-frame window at offset k
+            "states": [t/fps for t in range(-(self.num_past_frames + J), J + 1)],
             "action": [t/fps for t in range(self.action_chunk_size)]
         }
- 
+
 
     def __call__(self, data: dict[str, Any], **kwargs) -> dict[str, Any]:
         image_key = "observation.images.egocentric"
-        states = data["states"].numpy() # (To, Ds)
+        states = data["states"].numpy() # (past+1+2J, Ds)
+        J = self.state_temporal_jitter
+        if J > 0:
+            k = 0
+            if not kwargs.get("no_aug", False) and np.random.rand() < self.state_temporal_jitter_prob:
+                k = int(np.random.randint(-J, J + 1))
+            # window index of s_t is past+J; keep the (past+1) frames ending at s_{t+k}
+            end = self.num_past_frames + J + k + 1
+            states = states[end - (self.num_past_frames + 1):end] # (To, Ds)
         actions = data["action"].numpy() # (Tp, Da)
         action_is_pad = data["action_is_pad"].numpy() # (Ta,) 
+        if self.yaw_sincos:
+            actions = encode_yaw_sincos(actions, self.yaw_dim) # (Tp, Da+1)
         pad_mask = np.ones_like(actions) * (1. - action_is_pad[...,None].astype(np.float32))
 
         states, _ = pad_to_len(states, self.pad_state_dim) if self.pad_state_dim is not None else (states, None)
@@ -623,6 +664,12 @@ class ActionStateTransform(FieldTransform):
     pad_action_dim: int | None = None
     pad_state_dim: int | None = None
 
+    # Target yaw at action[yaw_dim] is (sin, cos)-encoded by the repack transform: both dims get
+    # fixed [-1, 1] bounds (identity normalization), denormalize() decodes back to the angle
+    # (returns Da-1 dims) and the eval reports the wrapped angular error in rad.
+    yaw_sincos: bool = False
+    yaw_dim: int = 35
+
     def model_post_init(self, __context: Any) -> None:
         if not os.path.exists(resolve_path(self.stat_path)):
             return
@@ -645,6 +692,13 @@ class ActionStateTransform(FieldTransform):
                 self.state_max = stats[self.stat_state_key]["max"]
         else:
             raise ValueError(f"Unsupported action normalization type: {self.action_norm_type}")
+
+        if self.yaw_sincos:
+            # sin and cos live in [-1, 1] whatever the task mix; set before padding (zero-padded
+            # min=max=0 would hit ill_mask and pass through raw)
+            k = self.yaw_dim
+            self.action_min = list(self.action_min[:k]) + [-1.0, -1.0] + list(self.action_min[k + 1:])
+            self.action_max = list(self.action_max[:k]) + [1.0, 1.0] + list(self.action_max[k + 1:])
 
         if self.pad_action_dim is not None:
             self.action_min= pad_to_len(np.array(self.action_min, dtype=np.float32), self.pad_action_dim, dim=0)[0].tolist()
@@ -730,8 +784,12 @@ class ActionStateTransform(FieldTransform):
 
         if self.action_norm_type == "bounds" or \
             self.action_norm_type == "bounds_q99":
-            low = array_class(self.action_min, dtype=data_type)  # type: ignore
-            high = array_class(self.action_max, dtype=data_type)  # type: ignore
+            amin, amax = list(self.action_min), list(self.action_max)  # type: ignore
+            if self.yaw_sincos and L1_err.shape[-1] == len(amin) - 1:
+                # error already decoded by yaw_sincos_l1_err: drop the cos bound
+                del amin[self.yaw_dim + 1], amax[self.yaw_dim + 1]
+            low = array_class(amin, dtype=data_type)  # type: ignore
+            high = array_class(amax, dtype=data_type)  # type: ignore
             
             if self.use_norm_mask:
                 if torch.is_tensor(L1_err):
@@ -819,7 +877,19 @@ class ActionStateTransform(FieldTransform):
                 action_norm_masks = np.array(action_norm_masks)
 
             action = where(action_norm_masks, 0.5 * (normalized + 1) * (high - low) + low, normalized)  # type: ignore
+        if self.yaw_sincos:
+            action = decode_yaw_sincos(action, self.yaw_dim) # (..., Da-1), yaw in rad
         return action # type: ignore
+
+    def yaw_sincos_l1_err(self, pred, gt):
+        """Normalized (..., Da) pred/gt -> (..., Da-1) L1 error in normalized units, with the
+        yaw column replaced by the wrapped angular error (rad). Since the yaw bounds are [-1, 1],
+        denormalize_L1_action_err scales that column by 0.5 * 2 = 1, i.e. it stays in rad."""
+        k = self.yaw_dim
+        err = (decode_yaw_sincos(pred, k) - decode_yaw_sincos(gt, k)).abs()
+        d = err[..., k]
+        err[..., k] = torch.atan2(torch.sin(d), torch.cos(d)).abs()
+        return err
 
 
 class Qwen3vlModelTransform(ModelTransform):

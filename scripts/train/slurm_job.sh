@@ -66,6 +66,33 @@ else
     echo "             stage it with: sudo bash scripts/data/stage_pack_local.sh $PSI_STAGE_IDS"
 fi
 
+# Node-local venv stage. The psi venv is baked into psix.sqsh at /workspace/.venv-psi and
+# needs nothing; .venv-dreamzero lives on beegfs. transformers opens every file under
+# models/ at import, and 32 ranks doing that at once makes the beegfs client return a
+# transient ENOENT on an existing .py file: jobs 5470 (x2) and 5489 each lost a different
+# node on a different file that way. Copy the venv to node-local disk once per node
+# (incremental rsync after the first time) and mount it at /workspace/<venv>, which the
+# dreamzero recipes prefer when present. PSI_STAGE_VENV=<name> overrides the recipe
+# auto-detect; PSI_STAGE_VENV=0 disables it. Falls back to beegfs if any node fails.
+PSI_LOCAL_VENV_ROOT="/var/lib/h100-job-cache/${USER:-songlinwei}/venv"
+if [ -z "${PSI_STAGE_VENV+x}" ] && [ -f "$_recipe" ]; then
+    PSI_STAGE_VENV=$(grep -oE '\.venv-[A-Za-z0-9_-]+' "$_recipe" | grep -vx '.venv-psi' | sort -u | head -1)
+fi
+_venv_mount=
+if [ -n "${PSI_STAGE_VENV:-}" ] && [ "$PSI_STAGE_VENV" != 0 ] && [ -d "$PROJECT_ROOT/$PSI_STAGE_VENV" ]; then
+    echo "Venv stage:  $PSI_STAGE_VENV -> $PSI_LOCAL_VENV_ROOT on $SLURM_NNODES node(s), started $(date '+%H:%M:%S')"
+    if srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 --kill-on-bad-exit=1 \
+          bash "$PROJECT_ROOT/scripts/train/stage_venv_local.sh" \
+          "$PROJECT_ROOT/$PSI_STAGE_VENV" "$PSI_LOCAL_VENV_ROOT/$PSI_STAGE_VENV" "/workspace/$PSI_STAGE_VENV"; then
+        _venv_mount=",$PSI_LOCAL_VENV_ROOT/$PSI_STAGE_VENV:/workspace/$PSI_STAGE_VENV"
+        echo "Venv stage:  done $(date '+%H:%M:%S'); mounted at /workspace/$PSI_STAGE_VENV"
+    else
+        echo "Venv stage:  FAILED on at least one node; using the beegfs venv (expect import flakiness)"
+    fi
+else
+    echo "Venv stage:  none (PSI_STAGE_VENV='${PSI_STAGE_VENV:-}')"
+fi
+
 # Enroot runtime/data/cache paths are managed by /etc/enroot/enroot.conf.d/10-h100-defaults.conf.
 # Keep them node-local to avoid BeeGFS metadata pressure during Pyxis startup.
 MASTER_NODE=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
@@ -119,8 +146,9 @@ srun_exit=0
 srun \
   --ntasks=$SLURM_NNODES \
   --ntasks-per-node=1 \
+  --kill-on-bad-exit=1 \
   --container-image=/mnt/beegfs/containers/psix.sqsh \
-  --container-mounts=/mnt/beegfs:/mnt/beegfs,"$PROJECT_ROOT":/workspace/psi0,/var/lib/h100-job-cache:/var/lib/h100-job-cache \
+  --container-mounts=/mnt/beegfs:/mnt/beegfs,"$PROJECT_ROOT":/workspace/psi0,/var/lib/h100-job-cache:/var/lib/h100-job-cache${_venv_mount} \
   --container-workdir=/workspace/psi0 \
   bash -lc "
     export TMPDIR=\"$H100_JOB_CACHE_ROOT/tmp\"
