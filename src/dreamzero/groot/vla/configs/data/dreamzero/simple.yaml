@@ -19,6 +19,8 @@ single_dataset_cls: groot.vla.data.dataset.lerobot_sharded.ShardedLeRobotSubLang
 # Set your SIMPLE dataset path here or override via CLI:
 #   simple_data_root=/path/to/your/simple_dataset
 simple_data_root: ???
+# Dataset subdirectory under simple_data_root (override via CLI: simple_task=<name>)
+simple_task: G1WholebodyLocomotionPickBetweenTablesTeleop-v0
 
 train_dataset:
   _target_: ${mixture_dataset_cls}
@@ -26,7 +28,7 @@ train_dataset:
   mixture_spec:
     - dataset_path:
         simple:
-          - ${simple_data_root}/G1WholebodyLocomotionPickBetweenTablesTeleop-v0
+          - ${simple_data_root}/${simple_task}
       dataset_weight: 1.0
       distribute_weights: true
 

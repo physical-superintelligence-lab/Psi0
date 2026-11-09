@@ -46,13 +46,11 @@ import tyro
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from PIL import Image
 from torchvision.transforms import v2
 
 from psi.config.config import ServerConfig
 from psi.deploy.helpers import RequestMessage, ResponseMessage
 from psi.deploy.serve_psi0_simple import Server
-from psi.utils import pad_to_len
 from psi.utils.overwatch import initialize_overwatch
 
 overwatch = initialize_overwatch(__name__)
@@ -120,8 +118,12 @@ class BatchServer(Server):
         # The batching path only implements the train-time (frozen-prefix) RTC sampler,
         # and _use_rtc/_infer_rtc are shared by the whole batch. Base `Server` resolves
         # rtc_mode="auto" to "test_time" on a --model.no-rtc checkpoint, which this
-        # subclass would then silently serve through the train-time sampler.
-        kwargs.setdefault("rtc_mode", "train")
+        # subclass would then silently serve through the train-time sampler. Resolve "auto"
+        # here instead of defaulting to "train": an explicit "train" makes the base class
+        # turn RTC on even without --rtc (and refuse a --model.no-rtc checkpoint).
+        enable_rtc = kwargs.get("enable_rtc", args[4] if len(args) > 4 else False)
+        if kwargs.get("rtc_mode", "auto") == "auto":
+            kwargs["rtc_mode"] = "train" if enable_rtc else "off"
         super().__init__(*args, **kwargs)
         if self.rtc_mode == "test_time":
             raise NotImplementedError(
@@ -178,20 +180,12 @@ class BatchServer(Server):
             history = request.history if isinstance(request.history, dict) else {}
 
             req.client_id = self._client_id(req, history)
-            req.instruction = request.instruction
+            # every repack transform lowercases the instruction before tokenizing
+            req.instruction = str(request.instruction).lower()
             req.reset = "reset" in history
-            req.images = [
-                self._img_transform(Image.fromarray(img)) for img in request.image.values()
-            ]
-
-            states = torch.from_numpy(request.state["states"].copy())
-            if self.maxmin.normalize_state:  # type: ignore
-                states = torch.as_tensor(
-                    self.maxmin.normalize_state_func(
-                        pad_to_len(states.numpy(), self.pad_state_dim, dim=1)[0]
-                    )
-                )
-            req.state = states.unsqueeze(0).to(self.device)  # (1, To, Ds)
+            # same view ordering / state padding+normalization as the single-client server
+            req.images = [self._img_transform(img) for img in self._order_images(request.image)]
+            req.state = self._prepare_states(request.state).unsqueeze(0)  # (1, To, Ds)
         except BaseException as e:  # noqa: BLE001 - reported back to this one client
             import traceback
 
@@ -264,7 +258,7 @@ class BatchServer(Server):
         single poisoned request cannot fail everyone else's."""
         fn = self._infer_rtc if rtc else self._infer_plain
         try:
-            out = fn(sub).cpu().numpy()
+            out = fn(sub).float().cpu().numpy()
             for i, req in enumerate(sub):
                 results[id(req)] = self._finish(req, out[i])
             return
@@ -476,6 +470,8 @@ def serve(cfg: ServerMultiConfig) -> None:
         quiet_ms=cfg.quiet_ms,
         max_wait_ms=cfg.max_wait_ms,
         client_ttl_s=cfg.client_ttl_s,
+        group_by_instruction=cfg.group_by_instruction,
+        rtc_mode=cfg.rtc_mode,
     )
     overwatch.info("Server :: Spinning Up")
     server.run(cfg.host, cfg.port)

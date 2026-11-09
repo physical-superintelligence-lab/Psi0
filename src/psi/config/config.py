@@ -63,6 +63,8 @@ class TrainConfig(BaseModel):
     # Set to None to enforce a strict rolling window (useful for large models).
     preserve_checkpoint_every: int | None = 10000
     validation_steps: int = 50
+    # skip the validation pass at global step 0 (untrained model; validation_steps divides 0)
+    skip_first_eval: bool = False
 
     learning_rate: float = 1e-5
     # linear, cosine, cosine_with_restarts, polynomial, constant, constant_with_warmup

@@ -389,10 +389,20 @@ def extract_args_from_shell_script(script_path):
     print("Could not find args variable in the script.")
     return []
 
-def parse_args_to_tyro_config(args_or_script_path: Path | str, force_rewrite_config_file=False):
-    assert Path(args_or_script_path).exists(), f"Path does not exist: {args_or_script_path}"
+def parse_args_to_tyro_config(args_or_script_path: Path | str, force_rewrite_config_file=False,
+                              ignore_unknown_args: bool | None = None):
+    """Parse a training script (.sh) or a run's saved argv.txt into its launch config.
 
-    if str(args_or_script_path).endswith(".sh"):
+    ignore_unknown_args: skip (with a warning) options the current config no longer has, so
+    runs saved by older code still load. Defaults to True for a saved argv.txt and False for a
+    .sh script, where an unknown option is more likely a typo.
+    """
+    assert Path(args_or_script_path).exists(), f"Path does not exist: {args_or_script_path}"
+    is_script = str(args_or_script_path).endswith(".sh")
+    if ignore_unknown_args is None:
+        ignore_unknown_args = not is_script
+
+    if is_script:
         print(f"Parsing configuration {args_or_script_path}")
         argv = [sys.argv[0]] + extract_args_from_shell_script(args_or_script_path)
     else:
@@ -410,7 +420,12 @@ def parse_args_to_tyro_config(args_or_script_path: Path | str, force_rewrite_con
         # eg., {trainer}_{data}_{model}_config, which corresponds to psi.config.train.pretrain_egodex_qwen3vl_config
         module = importlib.import_module(f"psi.config.train.{sys.argv[1]}")
         DynamicLaunchConfigClass =  getattr(module, "DynamicLaunchConfig")
-        config = tyro.cli(DynamicLaunchConfigClass, config=(tyro.conf.ConsolidateSubcommandArgs,), args=sys.argv[2:])
+        config = tyro.cli(DynamicLaunchConfigClass, config=(tyro.conf.ConsolidateSubcommandArgs,), args=sys.argv[2:],
+                          return_unknown_args=ignore_unknown_args)
+        if ignore_unknown_args:
+            config, unknown_args = config
+            if unknown_args:
+                print(f"Ignoring options unknown to the current config: {' '.join(unknown_args)}")
     except Exception as e:
         print(f"Failed to import config module 'psi.config.train.{sys.argv[1]}'")
         raise e

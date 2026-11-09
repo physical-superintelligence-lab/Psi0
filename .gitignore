@@ -92,3 +92,4 @@ scripts/train/psix/.smoke-psix-v2.slurm
 
 # Local, machine-specific deployment runbook; never commit.
 2machines.md
+logs/*

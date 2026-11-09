@@ -70,6 +70,9 @@ save_strategy: steps
 save_steps: 500
 eval_strategy: "no"  # there has to be a double quote; otherwise a bare `no` will be interpreted as False
 save_total_limit: 8
+# If set, replaces save_total_limit rotation: keep only the newest checkpoint (for
+# resume) plus the newest one whose step is a multiple of this value.
+keep_checkpoint_every: null
 report_to: wandb
 seed: 42
 do_eval: false

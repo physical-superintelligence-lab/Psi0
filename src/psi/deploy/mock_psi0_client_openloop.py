@@ -49,12 +49,11 @@ if _env_path.exists():
 else:
     overwatch.warning(".env not found in the current directory — environment variables may be missing.")
 
-# Modality split of the 36-D simple-embodiment action, matching
-# ActionStateTransform.denormalize_L1_action_err:
-#   hand_joints(14) + arm_joints(14) + rpy(3) + height(1) + vx + vy + vyaw + dyaw
-ACTION_SPLITS = [14, 28, 31, 32, 33, 34, 35]
-ACTION_LABELS = ["hand_joints", "arm_joints", "torso_rpy", "height",
-                 "vx", "vy", "vyaw", "target_yaw"]
+# Modality split of the 36-D simple-embodiment action (meta/modality.json), identical to
+# examples/psi0/openloop_eval_simple.py so the two reports are directly comparable.
+ACTION_SPLITS = [14, 28, 29, 30, 31, 32, 33, 34, 35]
+ACTION_LABELS = ["hand_joints", "arm_joints", "torsor_roll", "torsor_pitch", "torsor_yaw",
+                 "height", "vx", "vy", "torso_vyaw", "target_yaw"]
 
 
 def parse_args():
@@ -201,10 +200,11 @@ def report(gt_chunks, pred_chunks, rtts_ms, dataset_name, args, url, eps_idx) ->
     mean_err = errors.mean(axis=(0, 1))                       # (Da,) over frames and horizon
     first_step_err = errors[:, 0, :].mean(axis=0)             # (Da,) first step of each chunk
 
+    # per-group L2 norm of the per-dim mean L1 -- the metric openloop_eval_simple.py prints
     per_modality = dict(zip(ACTION_LABELS,
-                            [c.mean() for c in np.split(mean_err, ACTION_SPLITS, axis=-1)]))
+                            [np.linalg.norm(c) for c in np.split(mean_err, ACTION_SPLITS, axis=-1)]))
     per_modality_first = dict(zip(ACTION_LABELS,
-                                  [c.mean() for c in np.split(first_step_err, ACTION_SPLITS, axis=-1)]))
+                                  [np.linalg.norm(c) for c in np.split(first_step_err, ACTION_SPLITS, axis=-1)]))
 
     rtt = np.asarray(rtts_ms)
     warm = rtt[1:] if len(rtt) > 1 else rtt  # frame 0 absorbs GPU warmup
@@ -233,7 +233,7 @@ def report(gt_chunks, pred_chunks, rtts_ms, dataset_name, args, url, eps_idx) ->
     }
 
     # Per-modality L1 over the episode + error growth along the chunk horizon.
-    curves = {label: c.mean(axis=(1, 2))
+    curves = {label: np.linalg.norm(c.mean(axis=1), axis=-1)
               for label, c in zip(ACTION_LABELS, np.split(errors, ACTION_SPLITS, axis=-1))}
     n_rows = len(curves) + 1
     fig, axes = plt.subplots(n_rows, 1, figsize=(12, 2.2 * n_rows), sharex=False)
@@ -319,6 +319,15 @@ def main():
                          tqdm(idxs, desc=f"Loading eps {eps}", unit="frame")]
         if not episodes[eps]:
             raise RuntimeError(f"No frames found for episode index {eps}.")
+
+    # The RTC server conditions on the previous chunk shifted by its exec horizon, i.e. it
+    # assumes the client executed that many steps. Replaying at any other stride feeds it a
+    # misaligned prefix, so predict each frame independently instead.
+    exec_horizon = info["action"]["action_exec_horizon"]
+    if info.get("rtc_enabled") and not args.reset_every_frame and args.stride != exec_horizon:
+        overwatch.warning(f"stride {args.stride} != server exec horizon {exec_horizon}: chained "
+                          f"RTC would condition on a misaligned chunk; forcing --reset-every-frame")
+        args.reset_every_frame = True
 
     dataset_name = episodes[args.eps_idx[0]][0].get("dataset_name")
     overwatch.info(f"image_keys: {image_keys}  |  action_dim: {launch_config.model.action_dim}  "  # type: ignore

@@ -63,7 +63,7 @@ def get_checkpoint_path(output_dir: str, checkpoint_prefix: str = "checkpoint") 
             glob_checkpoints = [
                 str(x)
                 for x in pathlib.Path(output_dir).glob(f"{checkpoint_prefix}-*")
-                if os.path.isdir(x)
+                if os.path.isdir(x) and (x / "trainer_state.json").is_file()
             ]
             for path in glob_checkpoints:
                 regex_match = re.match(f".*{checkpoint_prefix}-([0-9]+)", path)
